@@ -257,7 +257,7 @@ enum CoordinateParser {
     /// A `locus://` link that reopens the app straight onto this spot.
     static func deepLink(_ coordinate: CLLocationCoordinate2D, name: String? = nil) -> URL? {
         var components = URLComponents()
-        components.scheme = "locus"
+        components.scheme = NextBuild.usesExternalTunnel ? "locusnext" : "locus"
         components.host = "teleport"
         var items = [
             URLQueryItem(name: "lat", value: String(coordinate.latitude)),

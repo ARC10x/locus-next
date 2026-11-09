@@ -486,8 +486,10 @@ final class SpoofSession: ObservableObject {
     /// fraction of a second away anyway.
     func reapplyCurrentLocation() {
         guard isSpoofing, !isRouting, !joystickActive, let here = simulated else { return }
+        let generation = commandGeneration
         Task { [weak self] in
-            await self?.apply(here, pairing: PairingStore.shared, markRecent: false)
+            guard let self, generation == self.commandGeneration else { return }
+            await self.apply(here, pairing: PairingStore.shared, markRecent: false)
         }
     }
 
@@ -677,8 +679,10 @@ final class SpoofSession: ObservableObject {
     private func settleMotion() {
         guard lastFixWasMoving, activeBackend == .direct, let here = simulated else { return }
         lastFixWasMoving = false
+        let generation = commandGeneration
         Task { [weak self] in
-            guard let self, self.simulated != nil, !self.isRouting, !self.joystickActive else { return }
+            guard let self, generation == self.commandGeneration,
+                  self.simulated != nil, !self.isRouting, !self.joystickActive else { return }
             await self.apply(here, pairing: PairingStore.shared, markRecent: false, motion: .stationary)
         }
     }
@@ -1496,7 +1500,7 @@ final class SpoofSession: ObservableObject {
                 // A route re-sends far more often than this on its own; resending
                 // underneath it would fight the walker for the current fix.
                 guard (!self.isRouting || self.isRoutePaused), !self.joystickActive, !self.isRecovering,
-                      !self.status.isDropped, !self.isStopping else { return }
+                      !self.commandInFlight, !self.isBusy, !self.status.isDropped, !self.isStopping else { return }
                 await self.apply(sim, pairing: pairing, markRecent: false)
             }
         }

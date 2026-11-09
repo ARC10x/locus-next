@@ -98,7 +98,7 @@ final class PairingStore: ObservableObject {
         // working pairing. Never log the parser error: it may contain secrets.
         var handle: OpaquePointer?
         let error = data.withUnsafeBytes { bytes in
-            rp_pairing_file_from_bytes(bytes.bindMemory(to: UInt8.self).baseAddress, data.count, &handle)
+            rp_pairing_file_from_bytes(bytes.bindMemory(to: UInt8.self).baseAddress, numericCast(data.count), &handle)
         }
         defer { if let handle { rp_pairing_file_free(handle) } }
         if let error {
