@@ -791,7 +791,6 @@ final class SpoofSession: ObservableObject {
             guard await self.apply(plan.fix(at: clock).coordinate, pairing: pairing, markRecent: false)
                     || self.isRecovering else { return }
             while generation == self.flightGeneration, !Task.isCancelled, !self.isStopping {
-                let tick = ProcessInfo.processInfo.systemUptime
                 guard await self.awaitRecovery(pairing: pairing, coordinate: plan.fix(at: clock).coordinate) else {
                     self.checkpointFlight(); return
                 }
@@ -800,6 +799,7 @@ final class SpoofSession: ObservableObject {
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     continue
                 }
+                let tick = ProcessInfo.processInfo.systemUptime
                 let next = min(plan.duration, clock + 1)
                 let fix = plan.fix(at: next)
                 guard await self.apply(fix.coordinate, pairing: pairing, markRecent: false) else {
@@ -1846,6 +1846,7 @@ extension SpoofSession {
         isRecovering = true
         checkpointRoute()
         SessionDiagnostics.shared.record("Récupération commencée; scénario suspendu")
+        checkpointFlight()
         if !failureNotified {
             failureNotified = true
             postDropNotification("La simulation n’est plus confirmée. Tentatives de reconnexion en cours.")

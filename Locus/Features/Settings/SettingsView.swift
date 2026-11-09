@@ -70,6 +70,19 @@ struct SettingsView: View {
                                 .font(.footnote).foregroundStyle(.secondary)
                             Button("Ouvrir LocalDevVPN") { LocalDevVPN.openInstalled() }
                             Button("Tester l’accès au service Developer") { Task { await tunnel.runProbe() } }
+                                .disabled(tunnel.lastProbe?.isRunning == true)
+                            if let probe = tunnel.lastProbe {
+                                switch probe {
+                                case .running:
+                                    ProgressView("Test en cours…")
+                                case .reachable(let milliseconds, _):
+                                    Label("Service Developer accessible (\(milliseconds) ms)", systemImage: "checkmark.circle")
+                                        .foregroundStyle(.green)
+                                case .unreachable:
+                                    Label("Service Developer inaccessible via LocalDevVPN", systemImage: "exclamationmark.triangle")
+                                        .foregroundStyle(.orange)
+                                }
+                            }
                             Text("La disponibilité du tunnel ne confirme pas à elle seule la simulation.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
