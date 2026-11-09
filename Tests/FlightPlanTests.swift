@@ -111,4 +111,27 @@ final class FlightPlanTests: XCTestCase {
         XCTAssertEqual(FlightSpeedUnit.knots.value(1852.0 / 3600), 1, accuracy: 0.00001)
         XCTAssertEqual(FlightSpeedUnit.mph.value(0.44704), 1, accuracy: 0.00001)
     }
+
+    func testStartupProbeIsOneBoundedMovementAlongThePlan() throws {
+        let plan = try FlightPlan(configuration())
+        for elapsed in [0.0, plan.duration * 0.4, plan.duration - 1] {
+            let probe = try XCTUnwrap(plan.startupProbe(at: elapsed))
+            XCTAssertGreaterThan(probe.elapsed, elapsed)
+            XCTAssertLessThanOrEqual(probe.elapsed - elapsed, 15)
+            XCTAssertLessThanOrEqual(Geo.distance(plan.fix(at: elapsed).coordinate, probe.coordinate), 5.00001)
+            XCTAssertEqual(Geo.distance(plan.fix(at: probe.elapsed).coordinate, probe.coordinate), 0)
+        }
+        XCTAssertNil(plan.startupProbe(at: plan.duration))
+        XCTAssertNil(plan.startupProbe(at: .nan))
+        XCTAssertNil(plan.startupProbe(at: -1))
+    }
+
+    func testStartupProbeHandlesTerminalOnRunwayWithoutSkippingFarAhead() throws {
+        var config = configuration()
+        config.points[0] = config.points[1]
+        let plan = try FlightPlan(config)
+        let probe = try XCTUnwrap(plan.startupProbe(at: 0))
+        XCTAssertEqual(probe.phase, .takeoff)
+        XCTAssertLessThanOrEqual(Geo.distance(config.points[0].clLocation, probe.coordinate), 5.00001)
+    }
 }

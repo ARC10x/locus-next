@@ -1,5 +1,32 @@
 # Locus Next Test 1.4.0 — aviation simulée et surveillance
 
+## Correctif 1.4.1 : démarrage en attente
+
+Le journal iPhone du 9 novembre montre un accès TCP Developer réussi à 21:56:47
+(Paris), mais aucune confirmation après 21:54:57. Les trois tentatives manuelles
+de 22:02 ont de nouveau accédé au service sans produire de confirmation. Cela
+localise le blocage côté vérification ; le journal ne permet pas de déterminer
+si les lectures manquent, sont anciennes ou sont refusées pour un autre motif.
+
+Le correctif relance le lecteur Core Location sans fermer la connexion Developer.
+Il conserve les exigences de fraîcheur, précision, source simulée et concordance.
+Les refus et l'état du lecteur rejoignent le journal sans coordonnées.
+La relance est espacée d'au moins 15 secondes. Un simple requestLocation pendant
+des mises à jour continues serait sans effet d'après la documentation Apple :
+https://developer.apple.com/documentation/corelocation/cllocationmanager/requestlocation()
+
+Au démarrage du vol, si la lecture initiale n'est pas confirmée après trois
+secondes, une seule avance sur le parcours est autorisée, limitée à cinq mètres
+et quinze secondes de scénario. Le temps correspondant est attendu ; aucun
+mouvement supplémentaire ni avancement sauvegardé n'est accepté sans confirmation.
+Ce test vise le cas où le renvoi d'une position immobile ne produit pas de nouveau
+fix. Il ne garantit pas qu'iOS en fournisse un.
+
+Après trente secondes sans preuve et hors récupération moteur déjà engagée,
+le scénario sauvegardé s'arrête avec une explication et un bouton de reprise.
+Le transport ne boucle plus indéfiniment sur le même point en gardant le vol actif.
+Un essai sur iPhone est indispensable ; la panne 5G reste indépendante et ouverte.
+
 Cette version ajoute un moteur aérien indépendant du moteur routier. Les profils
 Boeing 737-800, Airbus A320, Airbus A350, Boeing 777 et personnalisé sont des
 préréglages illustratifs modifiables, pas des performances certifiées.

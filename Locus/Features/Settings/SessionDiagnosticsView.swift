@@ -3,6 +3,7 @@ import SwiftUI
 struct SessionDiagnosticsView: View {
     @EnvironmentObject private var session: SpoofSession
     @StateObject private var diagnostics = SessionDiagnostics.shared
+    @StateObject private var probe = LocationProbe.shared
     @State private var exportURL: URL?
     @State private var exportFailed = false
 
@@ -24,6 +25,7 @@ struct SessionDiagnosticsView: View {
             }
             Section("Exporter") {
                 Button("Préparer les diagnostics") {
+                    diagnostics.record(probe.diagnosticSummary)
                     do { exportURL = try diagnostics.export(); exportFailed = false }
                     catch { exportFailed = true }
                 }
@@ -31,6 +33,16 @@ struct SessionDiagnosticsView: View {
                 if exportFailed { Text("Impossible de préparer le journal.").foregroundStyle(.red) }
                 Text("Le journal exclut les coordonnées, le contenu RPPairing et les secrets.")
                     .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Lectures de localisation") {
+                Text(probe.diagnosticSummary).font(.footnote)
+                if let date = probe.lastCallbackAt {
+                    Text("Dernière réception : \(date.formatted(date: .omitted, time: .standard))")
+                }
+                if let code = probe.lastErrorCode { Text("Erreur Core Location : \(code)") }
+                if let issue = session.verificationIssue { Text(issue).foregroundStyle(.orange) }
+                Button("Actualiser les lectures sans reconnecter") { session.refreshVerification() }
+                    .disabled(session.simulated == nil)
             }
             Section("Événements récents") {
                 ForEach(diagnostics.events.reversed()) { event in

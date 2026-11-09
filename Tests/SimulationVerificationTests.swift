@@ -56,4 +56,25 @@ final class SimulationVerificationTests: XCTestCase {
         evidence.reset()
         XCTAssertFalse(evidence.observesRealPosition(timestamp: now, accuracy: 5, simulated: false, now: now))
     }
+
+    func testDiagnosticReasonsDoNotRelaxConfirmationRequirements() {
+        var evidence = SimulationVerification()
+        evidence.sent(position, at: sentAt)
+        let time = sentAt.addingTimeInterval(2)
+        XCTAssertEqual(evidence.rejection(coordinate: position, timestamp: sentAt.addingTimeInterval(-20),
+                                          accuracy: 5, simulated: true, now: time), .stale)
+        XCTAssertEqual(evidence.rejection(coordinate: position, timestamp: time,
+                                          accuracy: 500, simulated: true, now: time), .inaccurate)
+        XCTAssertEqual(evidence.rejection(coordinate: position, timestamp: time,
+                                          accuracy: 5, simulated: nil, now: time), .unknown)
+        XCTAssertEqual(evidence.rejection(coordinate: position, timestamp: time,
+                                          accuracy: 5, simulated: false, now: time), .real)
+        XCTAssertEqual(evidence.rejection(coordinate: Geo.offset(position, east: 1000, north: 0), timestamp: time,
+                                          accuracy: 5, simulated: true, now: time), .unmatched)
+        XCTAssertFalse(evidence.isFresh(at: time))
+        XCTAssertNil(evidence.rejection(coordinate: position, timestamp: time,
+                                        accuracy: 5, simulated: true, now: time))
+        XCTAssertTrue(evidence.observe(coordinate: position, timestamp: time,
+                                       accuracy: 5, simulated: true, now: time))
+    }
 }

@@ -201,6 +201,8 @@ final class SpoofSession: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     @Published private(set) var lastConfirmedAt: Date?
+    @Published private(set) var verificationIssue: String?
+    private var lastRejectionLog: SimulationVerification.Rejection?
     @Published private(set) var isRecovering = false
     @Published private(set) var isChangingDestination = false
     @Published var flightConfiguration = FlightConfiguration()
@@ -579,6 +581,7 @@ final class SpoofSession: ObservableObject {
         }
         if simulated != nil, !verification.isFresh(at: Date()) {
             status = .verifying
+            refreshVerification()
             // Refresh the existing session first. Missing callbacks while
             // locked do not justify tearing down a working developer channel.
             reapplyCurrentLocation()
@@ -772,6 +775,7 @@ final class SpoofSession: ObservableObject {
         flightConfiguration = configuration
         flightPoints = configuration.points.map { Optional($0) }
         flightFix = plan.fix(at: elapsed)
+        verificationIssue = nil
         isFlightPaused = false
         let generation = flightGeneration
         checkpointFlight()
@@ -790,6 +794,29 @@ final class SpoofSession: ObservableObject {
             var phase: FlightPhase?
             guard await self.apply(plan.fix(at: clock).coordinate, pairing: pairing, markRecent: false)
                     || self.isRecovering else { return }
+            // Send just one short movement along the requested flight before
+            // waiting. A static point may not generate new Core Location fixes.
+            // The scenario clock is committed only after fresh confirmation.
+            self.refreshVerification()
+            let command = self.commandGeneration
+            if !self.isRecovering, !self.isFlightPaused,
+               !(await self.waitForConfirmation(generation: command, seconds: 3)),
+               !self.isRecovering, command == self.commandGeneration,
+               generation == self.flightGeneration, !Task.isCancelled,
+               !self.backgroundBudgetExpired,
+               let probe = plan.startupProbe(at: clock) {
+                SessionDiagnostics.shared.record("Vol: avance de vérification unique, limitée à 5 m")
+                let pause = max(0, probe.elapsed - clock - 3)
+                if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
+                guard generation == self.flightGeneration, !Task.isCancelled, !self.isStopping,
+                      !self.isFlightPaused else { return }
+                guard await self.apply(probe.coordinate, pairing: pairing, markRecent: false) else { return }
+                guard await self.awaitRecovery(pairing: pairing, coordinate: probe.coordinate),
+                      generation == self.flightGeneration, !Task.isCancelled else { return }
+                clock = probe.elapsed
+                self.flightFix = probe
+                self.checkpointFlight()
+            }
             while generation == self.flightGeneration, !Task.isCancelled, !self.isStopping {
                 guard await self.awaitRecovery(pairing: pairing, coordinate: plan.fix(at: clock).coordinate) else {
                     self.checkpointFlight(); return
@@ -1676,6 +1703,9 @@ final class SpoofSession: ObservableObject {
                 guard !self.isRecovering, !self.isStopping, !self.status.isDropped else { return }
                 if !self.verification.isFresh(at: Date()) {
                     self.status = .verifying
+                    if UIApplication.shared.applicationState == .active {
+                        LocationProbe.shared.refresh()
+                    }
                     // A stationary, locked phone may stop delivering fixes.
                     // Keep the confirmation honest without reconnecting on silence.
                 }
@@ -1796,6 +1826,13 @@ extension SpoofSession {
         // by iOS, unlike a timer that merely survived in memory.
         if abs(Date().timeIntervalSince(reading.timestamp)) < 2 { backgroundBudgetExpired = false }
         guard !isStopping, !status.isDropped || isRecovering else { return }
+        let rejection = verification.rejection(coordinate: reading.coordinate, timestamp: reading.timestamp,
+                                               accuracy: reading.horizontalAccuracy,
+                                               simulated: reading.isSimulatedBySoftware, now: Date())
+        if let rejection, simulated != nil, rejection != lastRejectionLog {
+            lastRejectionLog = rejection
+            SessionDiagnostics.shared.record("Confirmation refusée: \(rejection.rawValue)")
+        }
         if verification.observesRealPosition(timestamp: reading.timestamp,
                                             accuracy: reading.horizontalAccuracy,
                                             simulated: reading.isSimulatedBySoftware, now: Date()) {
@@ -1812,6 +1849,8 @@ extension SpoofSession {
                                 accuracy: reading.horizontalAccuracy,
                                 simulated: reading.isSimulatedBySoftware, now: Date()) {
             lastConfirmedAt = verification.confirmedAt
+            verificationIssue = nil
+            lastRejectionLog = nil
             status = .active
             if Date().timeIntervalSince(lastEvidenceLog) > 30 {
                 lastEvidenceLog = Date()
@@ -1833,7 +1872,15 @@ extension SpoofSession {
 
     func retrySimulation() {
         guard !isStopping, !isRecovering, let coordinate = simulated ?? pin else { return }
+        refreshVerification()
         beginRecovery(at: coordinate, pairing: PairingStore.shared)
+    }
+
+    func refreshVerification() {
+        guard simulated != nil, !isStopping else { return }
+        LocationProbe.shared.monitorSession(true)
+        LocationProbe.shared.refresh()
+        SessionDiagnostics.shared.record(LocationProbe.shared.diagnosticSummary)
     }
 
     private func beginRecovery(at coordinate: CLLocationCoordinate2D, pairing: PairingStore) {
@@ -1900,11 +1947,24 @@ extension SpoofSession {
     /// Waits without advancing the walker or issuing more location commands.
     private func awaitRecovery(pairing: PairingStore, coordinate: CLLocationCoordinate2D) async -> Bool {
         var lastRefresh = Date.distantPast
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
         while !verification.isFresh(at: Date()) || isRecovering {
             guard !Task.isCancelled, !isStopping, !backgroundBudgetExpired else { return false }
             if status.isDropped, !isRecovering { return false }
+            if !isRecovering, ProcessInfo.processInfo.systemUptime >= deadline {
+                let message = "Aucune position récente confirmée après 30 secondes. Le scénario est sauvegardé. Ouvrez Simulation et diagnostics pour vérifier les lectures, puis reprenez le trajet."
+                verificationIssue = message
+                status = .verifying
+                if UIApplication.shared.applicationState == .active { lastError = message }
+                checkpointRoute()
+                checkpointFlight()
+                SessionDiagnostics.shared.record("Attente de confirmation expirée; scénario sauvegardé")
+                SessionDiagnostics.shared.record(LocationProbe.shared.diagnosticSummary)
+                return false
+            }
             if !isRecovering, Date().timeIntervalSince(lastRefresh) >= 8 {
                 lastRefresh = Date()
+                if UIApplication.shared.applicationState == .active { LocationProbe.shared.refresh() }
                 // An actual send failure starts bounded recovery in apply.
                 // Otherwise wait for fresh proof without changing the scenario clock.
                 _ = await apply(simulated ?? coordinate, pairing: pairing, markRecent: false)

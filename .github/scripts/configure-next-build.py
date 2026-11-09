@@ -18,7 +18,7 @@ def configure():
     result = result.replace("com.chrismack.locus", "com.chrismack.locusnext.dev")
     result = result.replace("INFOPLIST_FILE: Locus/Resources/Info.plist", "INFOPLIST_FILE: build/next/Info.plist")
     result = result.replace("CODE_SIGN_ENTITLEMENTS: Locus/Resources/Locus.entitlements", "CODE_SIGN_ENTITLEMENTS: build/next/LocusNext.entitlements")
-    result = result.replace('MARKETING_VERSION: "1.3.0"', 'MARKETING_VERSION: "1.4.0"')
+    result = result.replace('MARKETING_VERSION: "1.3.0"', 'MARKETING_VERSION: "1.4.1"')
     # The bundled native library requires iOS 18. Keep the baseline untouched.
     result = result.replace('iOS: "17.0"', 'iOS: "18.0"')
     result = result.replace('IPHONEOS_DEPLOYMENT_TARGET: "17.0"', 'IPHONEOS_DEPLOYMENT_TARGET: "18.0"')

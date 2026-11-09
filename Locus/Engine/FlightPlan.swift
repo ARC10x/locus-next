@@ -144,6 +144,22 @@ struct FlightPlan {
         timeStretch = duration / minimum
     }
 
+    /// One bounded first movement can trigger a fresh fix when a stationary
+    /// Core Location stream has stopped reporting. Never starts free-running.
+    func startupProbe(at elapsed: Double) -> FlightFix? {
+        guard elapsed.isFinite, elapsed >= 0, elapsed < duration else { return nil }
+        let origin = fix(at: elapsed).coordinate
+        var low = elapsed, high = min(duration, elapsed + 15)
+        for _ in 0..<40 {
+            let middle = (low + high) / 2
+            if Geo.distance(origin, fix(at: middle).coordinate) <= 5 { low = middle }
+            else { high = middle }
+        }
+        let candidate = fix(at: low)
+        guard Geo.distance(origin, candidate.coordinate) >= 0.1 else { return nil }
+        return candidate
+    }
+
     func fix(at seconds: Double) -> FlightFix {
         let elapsed = seconds.isFinite ? min(duration, max(0, seconds)) : 0
         if elapsed >= duration {

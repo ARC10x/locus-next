@@ -13,6 +13,31 @@ struct SimulationVerification {
     private(set) var commands: [Command] = []
     private(set) var confirmedAt: Date?
 
+    enum Rejection: String {
+        case stale = "lecture trop ancienne"
+        case future = "horodatage futur"
+        case inaccurate = "précision insuffisante"
+        case real = "source non simulée"
+        case unknown = "source inconnue"
+        case unmatched = "lecture sans commande correspondante"
+    }
+
+    func rejection(coordinate: CLLocationCoordinate2D, timestamp: Date,
+                   accuracy: Double, simulated: Bool?, now: Date) -> Rejection? {
+        let age = now.timeIntervalSince(timestamp)
+        if age > Self.freshness { return .stale }
+        if age < -1 { return .future }
+        if !accuracy.isFinite || accuracy < 0 || accuracy > 100 { return .inaccurate }
+        guard let simulated else { return .unknown }
+        if !simulated { return .real }
+        let matches = commands.contains { command in
+            let lag = timestamp.timeIntervalSince(command.sentAt)
+            return lag >= 0 && lag <= Self.freshness
+                && Geo.distance(command.coordinate, coordinate) <= max(15, accuracy)
+        }
+        return matches ? nil : .unmatched
+    }
+
     mutating func reset() {
         commands.removeAll()
         confirmedAt = nil
@@ -27,18 +52,10 @@ struct SimulationVerification {
     @discardableResult
     mutating func observe(coordinate: CLLocationCoordinate2D, timestamp: Date,
                           accuracy: Double, simulated: Bool?, now: Date) -> Bool {
-        let age = now.timeIntervalSince(timestamp)
-        guard age >= -1, age <= Self.freshness,
-              accuracy.isFinite, accuracy >= 0, accuracy <= 100,
-              simulated == true else { return false }
         // A callback can lag a moving route. Compare it to commands preceding
         // that fix, never a future command or a coordinate from another session.
-        let matches = commands.contains { command in
-            let lag = timestamp.timeIntervalSince(command.sentAt)
-            return lag >= 0 && lag <= Self.freshness
-                && Geo.distance(command.coordinate, coordinate) <= max(15, accuracy)
-        }
-        guard matches else { return false }
+        guard rejection(coordinate: coordinate, timestamp: timestamp, accuracy: accuracy,
+                        simulated: simulated, now: now) == nil else { return false }
         confirmedAt = max(confirmedAt ?? .distantPast, timestamp)
         return true
     }

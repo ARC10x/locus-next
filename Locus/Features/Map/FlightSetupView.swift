@@ -130,6 +130,11 @@ struct FlightHUDView: View {
                         Spacer()
                         Button("Rester ici") { session.holdPosition() }
                     }
+                } else if session.savedFlight != nil {
+                    Button("Reprendre le vol sauvegardé") { session.resumeFlightCheckpoint() }
+                }
+                if let issue = session.verificationIssue {
+                    Text(issue).font(.caption).foregroundStyle(.orange)
                 }
                 Text(session.status.label).font(.caption).foregroundStyle(.secondary)
             }
