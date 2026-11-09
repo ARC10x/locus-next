@@ -213,6 +213,7 @@ final class SpoofSession: ObservableObject {
     private var failureNotified = false
     private var lastEvidenceLog = Date.distantPast
     private var currentResumeState: RouteResumeState?
+    private var ownsResumeProfileOverride = false
     private var monitoringStartedAt = Date.distantFuture
 
     /// Shared so App Intents — which run in this process but outside the view
@@ -303,6 +304,7 @@ final class SpoofSession: ObservableObject {
     /// Switches the active profile, replacing the live working copy.
     func selectProfile(_ id: UUID) {
         guard let profile = profiles.profile(id) else { return }
+        clearResumeProfileOverride()
         profiles.select(id)
         drive = profile
     }
@@ -791,6 +793,10 @@ final class SpoofSession: ObservableObject {
         stopJoystick(settle: false)
         invalidateCommands()
 
+        if let restoredProfile {
+            profileOverride = restoredProfile
+            ownsResumeProfileOverride = true
+        }
         isRoutePaused = false
         routeStartedAt = Date()
         lastRouteName = name
@@ -885,6 +891,7 @@ final class SpoofSession: ObservableObject {
             checkpointRoute()
         }
         if let simulated { HeldPositionRecord.save(simulated) }
+        clearResumeProfileOverride()
         refreshIdleTimer()
         settleMotion()
     }
@@ -933,8 +940,20 @@ final class SpoofSession: ObservableObject {
             currentResumeState = nil
         }
         if let simulated { HeldPositionRecord.save(simulated) }
+        clearResumeProfileOverride()
         refreshIdleTimer()
         if settle { settleMotion() }
+    }
+
+    private func clearResumeProfileOverride() {
+        guard ownsResumeProfileOverride else { return }
+        ownsResumeProfileOverride = false
+        profileOverride = nil
+    }
+
+    func setPlaybackScale(_ scale: Double) {
+        if profileOverride != nil { profileOverride?.timeScale = scale }
+        else { drive.timeScale = scale }
     }
 
     /// Picks an interrupted drive back up from where the progress file says it
@@ -1122,6 +1141,7 @@ final class SpoofSession: ObservableObject {
                 state.savedAt = Date()
                 state.planSnapshot = savedPlan
                 state.walkerSnapshot = walker.snapshot
+                state.profileSnapshot?.timeScale = scale
                 state.paused = isRoutePaused
                 currentResumeState = state
                 if Date().timeIntervalSince(lastProgressWrite) >= 5 || fix.isStopped {
@@ -1760,6 +1780,7 @@ extension SpoofSession {
     private func checkpointRoute() {
         guard var state = currentResumeState else { return }
         state.savedAt = Date()
+        state.profileSnapshot?.timeScale = activeProfile.timeScaleClamped
         routeStore.recordProgress(state)
     }
 

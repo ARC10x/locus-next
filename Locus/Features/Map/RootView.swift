@@ -27,17 +27,17 @@ struct RootView: View {
                 VStack(spacing: 10) {
                     tripSummary
 
-                    if let telemetry = session.telemetry, session.drive.showHUD {
+                    if let telemetry = session.telemetry, session.activeProfile.showHUD {
                         DriveHUDView(
                             telemetry: telemetry,
-                            profile: session.drive,
+                            profile: session.activeProfile,
                             isPaused: session.isRoutePaused,
                             onTogglePause: { session.toggleRoutePause() },
                             onStop: { session.cancelRoute() },
                             // Writes through to the active profile, which the
                             // drive loop now reads every tick — so this takes
                             // effect on the next fix, not the next route.
-                            onChangeTimeScale: { session.drive.timeScale = $0 }
+                            onChangeTimeScale: { session.setPlaybackScale($0) }
                         )
                         .locusGlassID("hud", in: bottomGlass)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
