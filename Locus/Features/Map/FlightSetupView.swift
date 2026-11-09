@@ -15,8 +15,8 @@ struct FlightSetupView: View {
         NavigationStack {
             Form {
                 Section("Scénario complet") {
-                    NavigationLink("Domicile → Orly → Dublin") { JourneySetupView() }
-                    NavigationLink("Promenade en ville") { StrollSetupView() }
+                    NavigationLink("Domicile → Orly → Dublin") { JourneySetupView(onStart: { dismiss() }) }
+                    NavigationLink("Promenade en ville") { StrollSetupView(onStart: { dismiss() }) }
                     Text("Parcours équipage, prochain horaire simulé et départ en un bouton.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

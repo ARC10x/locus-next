@@ -2,6 +2,12 @@ import CoreLocation
 import XCTest
 
 final class JourneyPlanTests: XCTestCase {
+    func testSubmetreInterpolationMovesAlongWalkingAndTaxiCurves() {
+        let a = CLLocationCoordinate2D(latitude: 48.7, longitude: 2.3)
+        let b = Geo.offset(a, east: 1, north: 0)
+        let middle = FlightPlan.interpolate(a, b, fraction: 0.5)
+        XCTAssertEqual(Geo.distance(a, middle), Geo.distance(a, b) / 2, accuracy: 0.01)
+    }
     func testRotationDoesNotLiftAircraftAtTaxiSpeed() throws {
         let plan = try FlightPlan(OrlyDublinScenario.configuration)
         var time = 0.0

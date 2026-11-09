@@ -14,7 +14,7 @@ Le trajet routier utilise MKDirections puis le moteur DriveWalker existant (vira
 - L’altitude reste nulle pendant l’accélération initiale ; rotation à la fin du segment de décollage.
 - Trajectoire aérienne avec points de passage et raccordements arrondis, vitesse calculée suivant la longueur parcourue.
 - Pistes Orly 25 et Dublin 28L : extrémités géographiques OurAirports. Pistes fixes, pas de choix selon météo ou NOTAM.
-- **Roulages et accès équipage illustratifs**, pas de garantie de suivi de chaque taxiway. Les téléchargements de géométrie OpenStreetMap ont échoué ; ne pas présenter ces tracés comme des itinéraires aéroportuaires validés. Ils nécessitent une prochaine révision sur cartographie vérifiée.
+- Roulages calculés sur le graphe des taxiways/taxilanes OpenStreetMap : environ 2,7 km à Orly et 2,8 km à Dublin. Connexion de 33 m à l’extrémité de piste à Orly. Stationnements fictifs sur le réseau, pas de porte affectée par la compagnie. Les sens de circulation et autorisations ATC ne sont pas reproduits. **Accès équipage entre le siège et l’avion estimé** ; aucun trajet interne validé.
 - Ni procédures SID/STAR, ni autorisation ATC, ni simulation certifiée des performances. Altitude affichée au-dessus du sol de référence du scénario, non injectée dans le moteur Developer.
 - Les sauvegardes de l’ancien modèle ne sont pas reprises sur une géométrie différente pour éviter un saut de position. Démarrer un nouveau scénario après mise à jour.
 - Le problème 5G n’est pas déclaré corrigé.
@@ -32,3 +32,5 @@ Vol → Promenade en ville : domicile ou repère de carte, durée souhaitée, ra
 ## Validation
 
 Tests de rotation, continuité, vitesse réelle le long du tracé, refus des durées étirées, horaires Paris et changement d’heure, sérialisation des étapes et rejet des raccords invalides. Compiler l’app iPhone et exécuter les tests macOS en CI avant livraison. Tests réseau MapKit et test complet sur iPhone nécessaires après livraison ; non remplaçables par les tests purs.
+
+- Taxiways : © OpenStreetMap contributors, ODbL, extraits API 0.6 du 9 novembre 2026. Coordonnées dérivées dans OrlyDublinScenario ; https://www.openstreetmap.org/copyright .

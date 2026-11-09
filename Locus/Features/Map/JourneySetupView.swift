@@ -56,6 +56,7 @@ enum JourneyBuilder {
 }
 
 struct JourneySetupView: View {
+    var onStart: () -> Void = {}
     @EnvironmentObject private var session: SpoofSession
     @Environment(\.dismiss) private var dismiss
     @AppStorage("locus.next.journey.home") private var homeAddress = ""
@@ -100,6 +101,16 @@ struct JourneySetupView: View {
                 if let error { Text(error).foregroundStyle(.red) }
                 if !current && plan != nil { Text("Paramètres modifiés : recalculez le scénario.").foregroundStyle(.orange) }
             }
+            Section("Essai du vol seul") {
+                Button("Démarrer uniquement Orly → Dublin") {
+                    var config = OrlyDublinScenario.configuration
+                    config.scenarioTitle = "Orly → Dublin · simulé"
+                    session.startFlight(config)
+                    if session.isFlying { onStart() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
+                }.disabled(session.isBusy || session.isRecovering || session.isRouting || busy)
+                Text("Départ immédiat du stationnement d’Orly, sans domicile ni attente. Pistes fixes et roulages OpenStreetMap ; aucune affectation réelle de porte ou de piste.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if current, let schedule, let plan {
                 Section("Prochain scénario · heure de Paris") {
                     LabeledContent("Départ du domicile", value: formatted(schedule.leaveHome))
@@ -115,10 +126,11 @@ struct JourneySetupView: View {
                         Marker("Orly", coordinate: plan.configuration.points[0].clLocation)
                         Marker("Dublin", coordinate: plan.configuration.points[5].clLocation)
                     }.frame(height: 280)
-                    Text("Pistes : Orly 25 → Dublin 28L. Accès équipage et roulages illustratifs, non vérifiés sur tous les taxiways. Trajectoire aérienne fictive avec virages arrondis ; aucune procédure ATC réelle reproduite.")
+                    Text("Pistes : Orly 25 → Dublin 28L. Roulages calculés sur les taxiways OpenStreetMap ; stationnements simulés et courts raccords aux pistes. Accès équipage estimé. Trajectoire aérienne fictive avec virages arrondis ; aucune procédure ATC réelle reproduite.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section {
+                    Link("Taxiways © OpenStreetMap · ODbL", destination: URL(string: "https://www.openstreetmap.org/copyright")!)
                     Button("Démarrer le scénario complet") { launch() }
                         .disabled(session.isBusy || session.isRecovering || session.isRouting)
                     Text("La simulation se place au domicile et attend l’heure prévue. Une pause ou une suspension iOS décale la suite : aucun rattrapage par téléportation. Pause, arrêt et reprise restent disponibles.")
@@ -173,6 +185,6 @@ struct JourneySetupView: View {
             seconds: schedule.leaveHome.timeIntervalSinceNow, phase: .waiting)
         config.groundStages = [wait] + stages
         session.startFlight(config)
-        if session.isFlying { dismiss() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
+        if session.isFlying { onStart() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
     }
 }

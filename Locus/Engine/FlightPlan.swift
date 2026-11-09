@@ -285,7 +285,11 @@ struct FlightPlan {
         }
         let x = vector(a), y = vector(b)
         let angle = acos(min(1, max(-1, zip(x, y).reduce(0) { $0 + $1.0 * $1.1 })))
-        if angle < 0.000001 { return a }
+        if angle < 0.000001 {
+            let delta = (b.longitude - a.longitude + 540).truncatingRemainder(dividingBy: 360) - 180
+            let longitude = (a.longitude + delta * f + 540).truncatingRemainder(dividingBy: 360) - 180
+            return CLLocationCoordinate2D(latitude: a.latitude + (b.latitude - a.latitude) * f, longitude: longitude)
+        }
         let denominator = sin(angle)
         let p = sin((1 - f) * angle) / denominator, q = sin(f * angle) / denominator
         let v = zip(x, y).map { p * $0.0 + q * $0.1 }

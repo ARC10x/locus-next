@@ -3,6 +3,7 @@ import MapKit
 import SwiftUI
 
 struct StrollSetupView: View {
+    var onStart: () -> Void = {}
     @EnvironmentObject private var session: SpoofSession
     @Environment(\.dismiss) private var dismiss
     @AppStorage("locus.next.journey.home") private var homeAddress = ""
@@ -47,7 +48,7 @@ struct StrollSetupView: View {
                     LabeledContent("Durée calculée, pauses incluses", value: "\(Int(ceil(plan.duration / 60))) min")
                     Button("Démarrer la promenade") {
                         session.startFlight(plan.configuration)
-                        if session.isFlying { dismiss() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
+                        if session.isFlying { onStart() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
                     }.disabled(session.isRouting || session.isBusy || session.isRecovering)
                 }
             }

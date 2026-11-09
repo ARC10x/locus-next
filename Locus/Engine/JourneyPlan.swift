@@ -102,23 +102,164 @@ enum OrlyDublinScenario {
     static func coordinate(_ lat: Double, _ lon: Double) -> Coordinate2D {
         Coordinate2D(CLLocationCoordinate2D(latitude: lat, longitude: lon))
     }
-    // OurAirports runway endpoints; illustrative apron/taxi paths must be labelled as such.
+    // OurAirports runway endpoints and OpenStreetMap taxiway geometry; fictional stand selection.
     static var configuration: FlightConfiguration {
         var value = FlightConfiguration()
         let departure = coordinate(48.7274017334, 2.4020700455) // Orly 25
         let departureEnd = coordinate(48.7193984985, 2.3585898876)
         let arrival = coordinate(53.4203, -6.25058) // Dublin 28L
         let arrivalEnd = coordinate(53.42243, -6.29007)
-        let stand = coordinate(48.7250, 2.3670)
-        let destination = coordinate(53.4262, -6.2588)
+        let stand = departureTaxi[0]
+        let destination = arrivalTaxi.last!
         value.points = [stand, departure, departureEnd, arrival, arrivalEnd, destination]
-        value.taxiOut = [stand, coordinate(48.7244, 2.3710), coordinate(48.7256, 2.3800),
-                         coordinate(48.7281, 2.3970), coordinate(48.7280, 2.4024), departure]
-        value.taxiIn = [arrivalEnd, coordinate(53.4230, -6.2900), coordinate(53.4253, -6.2840),
-                        coordinate(53.4243, -6.2670), coordinate(53.4253, -6.2610), destination]
+        value.taxiOut = departureTaxi
+        value.taxiIn = arrivalTaxi
         value.airWaypoints = [coordinate(49.15, 1.20), coordinate(49.70, -0.65),
                               coordinate(50.55, -2.10), coordinate(51.65, -3.60),
                               coordinate(52.65, -4.35), coordinate(53.37, -5.25)]
         return value
     }
+    // Derived from OpenStreetMap contributors, ODbL, 2026-11-09.
+    // Airport-internal taxi routing is illustrative, not an ATC clearance.
+    static let departureTaxi: [Coordinate2D] = [
+        coordinate(48.7250641, 2.3668667),
+        coordinate(48.725141, 2.3672793),
+        coordinate(48.7252752, 2.3679995),
+        coordinate(48.7255247, 2.3693382),
+        coordinate(48.7256965, 2.3702631),
+        coordinate(48.7258919, 2.3713376),
+        coordinate(48.7259322, 2.3715449),
+        coordinate(48.7259803, 2.3718088),
+        coordinate(48.7260281, 2.3720711),
+        coordinate(48.7261166, 2.3725561),
+        coordinate(48.7262867, 2.3734796),
+        coordinate(48.7263887, 2.3740337),
+        coordinate(48.7264895, 2.3745809),
+        coordinate(48.7267814, 2.3761491),
+        coordinate(48.7269054, 2.3768153),
+        coordinate(48.7269608, 2.3771045),
+        coordinate(48.7270107, 2.3773816),
+        coordinate(48.727149, 2.3781499),
+        coordinate(48.7273088, 2.3790208),
+        coordinate(48.7273213, 2.3790886),
+        coordinate(48.7274437, 2.3797431),
+        coordinate(48.7276193, 2.3806952),
+        coordinate(48.7277695, 2.3815195),
+        coordinate(48.7278318, 2.3818612),
+        coordinate(48.7281277, 2.3834495),
+        coordinate(48.7282029, 2.3838686),
+        coordinate(48.7282455, 2.3841404),
+        coordinate(48.7282676, 2.3843457),
+        coordinate(48.7282802, 2.384487),
+        coordinate(48.7282854, 2.3845452),
+        coordinate(48.7284413, 2.3869147),
+        coordinate(48.728504, 2.3878991),
+        coordinate(48.7285306, 2.388356),
+        coordinate(48.7288036, 2.3925996),
+        coordinate(48.728932, 2.3945962),
+        coordinate(48.7289331, 2.3946241),
+        coordinate(48.7290133, 2.3958578),
+        coordinate(48.7291248, 2.3976204),
+        coordinate(48.7292218, 2.3992482),
+        coordinate(48.7292186, 2.3993752),
+        coordinate(48.7291962, 2.3995032),
+        coordinate(48.7291522, 2.3996248),
+        coordinate(48.7289643, 2.4000753),
+        coordinate(48.7286071, 2.4009133),
+        coordinate(48.7284237, 2.4013346),
+        coordinate(48.7283417, 2.4014497),
+        coordinate(48.7282437, 2.4015281),
+        coordinate(48.7278061, 2.4017157),
+        coordinate(48.7277245, 2.4017294),
+        coordinate(48.7276429, 2.4017193),
+        coordinate(48.7275661, 2.4016848),
+        coordinate(48.7275023, 2.401643),
+        coordinate(48.7274017334, 2.4020700455)
+    ]
+    static let arrivalTaxi: [Coordinate2D] = [
+        coordinate(53.42243, -6.29007),
+        coordinate(53.4224306, -6.290075),
+        coordinate(53.4224565, -6.2902513),
+        coordinate(53.4224893, -6.2903639),
+        coordinate(53.4225183, -6.2904329),
+        coordinate(53.4225494, -6.2904851),
+        coordinate(53.4225949, -6.290546),
+        coordinate(53.4226476, -6.2905896),
+        coordinate(53.4227068, -6.2906237),
+        coordinate(53.4227737, -6.2906404),
+        coordinate(53.423185, -6.2907206),
+        coordinate(53.4233094, -6.2907448),
+        coordinate(53.4234113, -6.2907566),
+        coordinate(53.4234914, -6.2907463),
+        coordinate(53.4235481, -6.2907289),
+        coordinate(53.4236075, -6.290705),
+        coordinate(53.4236741, -6.2906654),
+        coordinate(53.4237407, -6.2906143),
+        coordinate(53.4238075, -6.2905444),
+        coordinate(53.4238631, -6.2904821),
+        coordinate(53.4239088, -6.290414),
+        coordinate(53.4239519, -6.290335),
+        coordinate(53.4239948, -6.2902432),
+        coordinate(53.4240313, -6.290151),
+        coordinate(53.4240585, -6.2900631),
+        coordinate(53.4240821, -6.2899757),
+        coordinate(53.4241038, -6.2898699),
+        coordinate(53.4241203, -6.2897551),
+        coordinate(53.4241286, -6.2896426),
+        coordinate(53.4241316, -6.2895327),
+        coordinate(53.4241263, -6.2893664),
+        coordinate(53.4240357, -6.2877965),
+        coordinate(53.4238226, -6.2838631),
+        coordinate(53.4238171, -6.2837551),
+        coordinate(53.423759, -6.282622),
+        coordinate(53.4237145, -6.2818514),
+        coordinate(53.4236441, -6.2805862),
+        coordinate(53.4236352, -6.2804245),
+        coordinate(53.4234882, -6.2777479),
+        coordinate(53.4231241, -6.2711187),
+        coordinate(53.4231073, -6.270809),
+        coordinate(53.4230652, -6.2700501),
+        coordinate(53.4230438, -6.2696861),
+        coordinate(53.4229596, -6.2681222),
+        coordinate(53.4228292, -6.265728),
+        coordinate(53.4228147, -6.2654608),
+        coordinate(53.4227532, -6.2643292),
+        coordinate(53.4227377, -6.2640855),
+        coordinate(53.422735, -6.2640377),
+        coordinate(53.4227066, -6.2635252),
+        coordinate(53.4226669, -6.2627749),
+        coordinate(53.4226777, -6.2625185),
+        coordinate(53.4226878, -6.262351),
+        coordinate(53.42271, -6.2621543),
+        coordinate(53.4227291, -6.2620114),
+        coordinate(53.4227689, -6.2617885),
+        coordinate(53.4228039, -6.2616437),
+        coordinate(53.4228738, -6.2613903),
+        coordinate(53.4229166, -6.2612619),
+        coordinate(53.4229809, -6.2610922),
+        coordinate(53.4230384, -6.2609587),
+        coordinate(53.4231036, -6.2608206),
+        coordinate(53.4232287, -6.2606038),
+        coordinate(53.4233025, -6.2604754),
+        coordinate(53.4242839, -6.2587987),
+        coordinate(53.4247931, -6.2579313),
+        coordinate(53.4253584, -6.2569624),
+        coordinate(53.4254583, -6.2568626),
+        coordinate(53.4255117, -6.2568335),
+        coordinate(53.425568, -6.2568115),
+        coordinate(53.4256125, -6.2568048),
+        coordinate(53.425667, -6.2568053),
+        coordinate(53.4257443, -6.2568223),
+        coordinate(53.4258076, -6.256859),
+        coordinate(53.4260884, -6.2570629),
+        coordinate(53.4264731, -6.2573378),
+        coordinate(53.4266166, -6.257451),
+        coordinate(53.4268035, -6.2575731),
+        coordinate(53.4268703, -6.2576328),
+        coordinate(53.4269068, -6.2576768),
+        coordinate(53.4269445, -6.2577518),
+        coordinate(53.4269746, -6.2578779),
+        coordinate(53.4270078, -6.2585412)
+    ]
+
 }
