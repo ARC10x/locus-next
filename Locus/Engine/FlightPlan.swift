@@ -133,9 +133,11 @@ struct FlightPlan {
             throw Invalid(message: "Points de passage aériens invalides.")
         }
         let airPath = FlightPolyline.rounded([p[2], departureVector] + waypoints + [approachVector, approach], trim: min(12000, airDistance * 0.04))
-        let climbPath = airPath.slice(0, airPath.length * 0.25)
-        let cruisePath = airPath.slice(airPath.length * 0.25, airPath.length * 0.75)
-        let descentPath = airPath.slice(airPath.length * 0.75, airPath.length)
+        let climbDistance = min(160000, airPath.length * 0.25)
+        let descentStart = airPath.length - min(180000, airPath.length * 0.25)
+        let climbPath = airPath.slice(0, climbDistance)
+        let cruisePath = airPath.slice(climbDistance, descentStart)
+        let descentPath = airPath.slice(descentStart, airPath.length)
         let top = climbPath.points.last!, descent = descentPath.points.first!
         let approachHeight = min(500, Geo.distance(approach, p[3]) / 76 * 5)
         // Short flights cannot plausibly reach long-haul cruising altitude.

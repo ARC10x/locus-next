@@ -24,6 +24,18 @@ final class JourneyPlanTests: XCTestCase {
         }
     }
 
+    func testLongFlightsDoNotSpendAQuarterOfTheRouteClimbing() throws {
+        var config = OrlyDublinScenario.configuration
+        config.taxiIn = nil
+        config.points[3] = OrlyDublinScenario.coordinate(40.64, -73.78)
+        config.points[4] = Coordinate2D(FlightPlan.destination(config.points[3].clLocation, bearing: 275, metres: 3000))
+        config.points[5] = Coordinate2D(FlightPlan.destination(config.points[4].clLocation, bearing: 0, metres: 300))
+        let plan = try FlightPlan(config)
+        let climb = try XCTUnwrap(plan.legs.first { $0.phase == .climb })
+        XCTAssertLessThan(climb.seconds, 1800)
+        XCTAssertLessThanOrEqual(climb.path!.length, 160001)
+    }
+
     func testPresetHasCurvedAirPathAndGeographicRunwayEndpoints() throws {
         let config = OrlyDublinScenario.configuration, plan = try FlightPlan(config)
         let cruise = try XCTUnwrap(plan.legs.first { $0.phase == .cruise })
