@@ -13,3 +13,8 @@ Payload/
 # moment a target or file moves — and a stale one silently builds an app with
 # no LocusTunnel extension. Run `xcodegen generate` instead.
 Locus.xcodeproj/
+project.next.yml
+Package.swift
+.build/
+.swiftpm/
+__pycache__/

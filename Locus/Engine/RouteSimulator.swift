@@ -324,6 +324,7 @@ enum RouteSimulator {
             courses: courses,
             cumulative: cumulative,
             profile: profile,
+            mode: mode,
             total: total
         )
 
@@ -600,13 +601,14 @@ enum RouteSimulator {
         courses: [CLLocationDirection],
         cumulative: [CLLocationDistance],
         profile: DriveProfile,
+        mode: TravelMode,
         total: CLLocationDistance
     ) -> (stops: [Bool], dwells: [TimeInterval]) {
         let count = cumulative.count
         var stops = [Bool](repeating: false, count: count)
         var dwells = [TimeInterval](repeating: 0, count: count)
 
-        let wantsJunctionStops = profile.stopAtJunctions && profile.junctionStopChance > 0
+        let wantsJunctionStops = mode.isMotorVehicle && profile.stopAtJunctions && profile.junctionStopChance > 0
         let wantsWaypointDwell = profile.waypointDwellSeconds > 0
         guard count > 2, wantsJunctionStops || wantsWaypointDwell else { return (stops, dwells) }
 
@@ -697,7 +699,8 @@ final class DriveWalker {
     /// - Parameter startDistance: where to pick the drive up, in metres from the
     ///   start. Stops before that point are marked served, so resuming halfway
     ///   doesn't brake for junctions that were already sat through.
-    init(plan: RoutePlan, profile: DriveProfile, startDistance: CLLocationDistance = 0) {
+    init(plan: RoutePlan, profile: DriveProfile, startDistance: CLLocationDistance = 0,
+         snapshot: DriveWalkerSnapshot? = nil) {
         self.plan = plan
         self.profile = profile
         self.trafficFactor = profile.traffic.meanFactor
@@ -708,6 +711,24 @@ final class DriveWalker {
                 servedStops.insert(index)
             }
         }
+        if let snapshot, snapshot.isValid(for: plan) {
+            distance = snapshot.distance
+            speed = snapshot.speed
+            elapsed = snapshot.elapsed
+            dwellRemaining = snapshot.dwellRemaining
+            servedStops = Set(snapshot.servedStops)
+            trafficFactor = snapshot.trafficFactor
+        }
+    }
+
+    var snapshot: DriveWalkerSnapshot {
+        DriveWalkerSnapshot(distance: distance, speed: speed, elapsed: elapsed,
+                            dwellRemaining: dwellRemaining, servedStops: servedStops.sorted(),
+                            trafficFactor: trafficFactor)
+    }
+
+    var currentFix: DriveFix {
+        fix(at: distance, index: indexBefore(distance: distance), stopped: speed < 0.3)
     }
 
     var totalDistance: CLLocationDistance { plan.totalDistance }
@@ -718,13 +739,13 @@ final class DriveWalker {
     /// Advances by `dt` simulated seconds and returns the fix to publish, or
     /// `nil` once the route is done.
     func step(dt: TimeInterval) -> DriveFix? {
-        guard !isFinished, !plan.isEmpty else { return nil }
+        guard !isFinished, !plan.isEmpty, dt.isFinite, dt > 0 else { return nil }
 
         elapsed += dt
         advanceTraffic(dt: dt)
 
         if dwellRemaining > 0 {
-            dwellRemaining -= dt
+            dwellRemaining = max(0, dwellRemaining - dt)
             speed = 0
             return fix(at: distance, index: indexBefore(distance: distance), stopped: true)
         }
@@ -751,7 +772,9 @@ final class DriveWalker {
         distance += travelled
 
         // Reached something that wants a halt: sit exactly on it.
-        if let stop = nextStop(after: previousDistance, upTo: distance) {
+        // A five-centimetre capture radius also handles floating point residue.
+        // It must not depend on GPS scatter, which is only presentation noise.
+        if let stop = nextStop(after: previousDistance, upTo: distance + 0.05) {
             servedStops.insert(stop)
             distance = plan.points[stop].distance
             speed = 0
@@ -764,6 +787,7 @@ final class DriveWalker {
 
         if distance >= plan.totalDistance {
             distance = plan.totalDistance
+            speed = 0
             isFinished = true
             return fix(at: distance, index: plan.points.count - 1, stopped: true)
         }
@@ -855,14 +879,17 @@ final class DriveWalker {
 
     private func interpolatedCeiling(at position: CLLocationDistance) -> CLLocationSpeed {
         let index = indexBefore(distance: position)
-        let here = effectiveCeiling(at: index)
+        // Stops are handled by the braking envelope, not this interpolation.
+        // Interpolating to zero makes v proportional to the distance remaining;
+        // at walking speed that approaches the stop forever without reaching it.
+        let here = plan.points[index].ceiling
         guard index < plan.points.count - 1 else { return here }
         let a = plan.points[index]
         let b = plan.points[index + 1]
         let span = b.distance - a.distance
         guard span > 0.001 else { return here }
         let t = ((position - a.distance) / span).clamped(to: 0...1)
-        return here + (effectiveCeiling(at: index + 1) - here) * t
+        return here + (b.ceiling - here) * t
     }
 
     private func coordinate(at position: CLLocationDistance, index: Int) -> (CLLocationCoordinate2D, CLLocationDirection) {
@@ -886,7 +913,7 @@ final class DriveWalker {
 
         // Sit in a lane rather than on the centreline: offset perpendicular to
         // the direction of travel, right-hand side unless told otherwise.
-        if profile.laneOffsetMetres != 0 {
+        if !stopped, profile.laneOffsetMetres != 0 {
             let side = profile.driveOnLeft ? -1.0 : 1.0
             let perpendicular = (course + 90) * .pi / 180
             coordinate = Geo.offset(
@@ -898,7 +925,7 @@ final class DriveWalker {
 
         // Receiver scatter, applied to the reported fix only — the car itself
         // stays on the road, so noise never accumulates into drift.
-        if profile.gpsNoiseMetres > 0 {
+        if !stopped, profile.gpsNoiseMetres > 0 {
             coordinate = Geo.offset(
                 coordinate,
                 east: noise.next() * profile.gpsNoiseMetres,

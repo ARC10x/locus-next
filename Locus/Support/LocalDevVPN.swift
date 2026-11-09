@@ -14,7 +14,9 @@ enum LocalDevVPN {
     static let detectURL = URL(string: "localdevvpn://")!
 
     /// Starts the tunnel, then returns to Locus via `locus://`.
-    static let enableURL = URL(string: "localdevvpn://enable?scheme=locus")!
+    static var enableURL: URL {
+        URL(string: "localdevvpn://enable?scheme=\(NextBuild.usesExternalTunnel ? "locusnext" : "locus")")!
+    }
 
     static var isInstalled: Bool {
         UIApplication.shared.canOpenURL(detectURL)

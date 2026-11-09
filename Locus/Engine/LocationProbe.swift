@@ -52,6 +52,16 @@ final class LocationProbe: NSObject, ObservableObject, CLLocationManagerDelegate
     /// How many views are showing the readout. The map chip and the sheet both
     /// use it, and closing the sheet mustn't freeze the chip underneath.
     private var users = 0
+    private var sessionMonitoring = false
+
+    func monitorSession(_ enabled: Bool) {
+        guard sessionMonitoring != enabled else { return }
+        sessionMonitoring = enabled
+        manager.allowsBackgroundLocationUpdates = enabled
+        manager.pausesLocationUpdatesAutomatically = !enabled
+        manager.showsBackgroundLocationIndicator = enabled
+        if enabled { start() } else { stop() }
+    }
 
     func start() {
         users += 1

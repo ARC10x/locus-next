@@ -135,6 +135,8 @@ targets:
       - path: Locus/Engine/RouteBuilder.swift
       - path: Locus/Engine/RouteSimulator.swift
       - path: Locus/Engine/RouteStorage.swift
+      - path: Locus/Engine/SimulationVerification.swift
+      - path: Locus/Engine/RouteCheckpoint.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.chrismack.locus.tests

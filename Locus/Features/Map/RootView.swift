@@ -90,7 +90,7 @@ struct RootView: View {
             // this does nothing at all, so it costs a check, not a VPN prompt.
             // Not when the direct engine is in use: it needs no tunnel, and
             // this would be a VPN prompt for nothing.
-            if !session.backend.needsTunnel {
+            if NextBuild.usesExternalTunnel || !session.backend.needsTunnel {
                 // Nothing to raise or reattach.
             } else if SpoofBackend.current.usesNetwork {
                 if SpoofBackend.current.usesDeveloper, tunnel.autoConnect {
@@ -241,13 +241,14 @@ struct StatusBarView: View {
     private var display: Display {
         switch session.status {
         case .connecting: return .spoof("Connecting…")
+        case .verifying: return .spoof("Vérification en cours…")
         case .active:
             // Network mode is only "spoofing" once iOS has actually been handed
             // a rewritten reply; before that, say what it's waiting for.
             if session.backend == .tunnel, SpoofBackend.current == .network, !spoofer.hasTakenEffect {
                 return .waitingForIOS
             }
-            return .spoof("Spoofing")
+            return .spoof("Simulation confirmée")
         case .reconnecting: return .spoof("Reconnecting…")
         case .dropped(let reason):
             return .spoof(reason.isEmpty ? "Disconnected" : "Disconnected — \(reason)")
@@ -295,7 +296,7 @@ struct StatusBarView: View {
             case .active:
                 return session.backend == .tunnel && SpoofBackend.current == .network && !spoofer.hasTakenEffect
                     ? LocusTheme.statusWarn : LocusTheme.statusGood
-            case .connecting, .reconnecting: return LocusTheme.statusWarn
+            case .connecting, .reconnecting, .verifying: return LocusTheme.statusWarn
             case .dropped: return LocusTheme.statusBad
             case .idle: return Color.primary.opacity(0.55)
             }
@@ -408,8 +409,8 @@ struct StatusBarView: View {
                 ? place
                 : ["Tap to nudge", place].compactMap { $0 }.joined(separator: " · ")
         case .spoof:
-            guard case .active = session.status else { return nil }
-            return placeLine
+            guard let date = session.lastConfirmedAt else { return "Aucune confirmation récente" }
+            return "Dernière confirmation : \(date.formatted(date: .omitted, time: .standard))"
         default:
             return nil
         }
@@ -557,6 +558,19 @@ struct BottomControlsView: View {
                 joystickButton
                 primaryAction
             }
+            if session.simulated != nil {
+                HStack {
+                    Button("Position fixe") { session.holdPosition() }
+                    Spacer()
+                    Button(session.isChangingDestination ? "Calcul du trajet…" : "Aller au repère") {
+                        if let pin = session.pin { session.changeDestination(to: pin, pairing: pairing) }
+                    }
+                    .disabled(session.pin == nil || session.isChangingDestination || session.isRecovering)
+                }
+                .font(.caption.weight(.semibold))
+                Text("Choisissez un repère sur la carte pour changer de destination.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .padding(14)
         .locusGlass(.regular, in: trayShape)
@@ -636,7 +650,7 @@ struct BottomControlsView: View {
             Button {
                 session.stop(pairing: pairing)
             } label: {
-                Text("Stop")
+                Text("Arrêter")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(.white)
                     .frame(minWidth: 72)
@@ -654,7 +668,7 @@ struct BottomControlsView: View {
                 }
                 session.teleport(to: pin, pairing: pairing)
             } label: {
-                Text("Teleport")
+                Text("Position fixe")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(.black)
                     .frame(minWidth: 96)

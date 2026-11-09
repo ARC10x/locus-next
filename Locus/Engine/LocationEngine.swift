@@ -16,6 +16,22 @@ enum LocationEngineError: LocalizedError {
     /// Network mode: the message is already a sentence.
     case network(String)
 
+    /// Stable, non-sensitive phase identifier for exported diagnostics.
+    var diagnosticCode: String {
+        switch self {
+        case .invalidIP: return "invalid_ip"
+        case .pairingRead: return "pairing_read"
+        case .tunnelCreate: return "tunnel_connect"
+        case .remoteServer: return "remote_handshake"
+        case .simulationCreate: return "simulation_open"
+        case .locationSet: return "location_set"
+        case .locationClear: return "location_clear"
+        case .notActive: return "no_session"
+        case .directUnavailable: return "direct_unavailable"
+        case .network: return "network_mode"
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidIP: return "Tunnel IP is invalid. Check Settings → Tunnel IP (usually 10.7.0.1)."
@@ -64,6 +80,17 @@ enum LocationEngine {
     private static let simulationCreate: Int32 = 10
     private static let locationSet: Int32 = 11
     private static let locationClear: Int32 = 12
+
+    /// Discard transport state without clearing the last simulated coordinate.
+    /// Used before a recovery attempt; keep ownership changes on the FFI queue.
+    static func disconnectSession() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async {
+                cleanup()
+                continuation.resume()
+            }
+        }
+    }
 
     static var isSessionActive: Bool {
         switch SpoofBackend.current {
@@ -197,6 +224,9 @@ enum LocationEngine {
             if let err = location_simulation_set(locationSimulation, latitude, longitude) {
                 idevice_error_free(err)
                 cleanup()
+                // Recovery belongs to SpoofSession, which counts attempts,
+                // checks cancellation and verifies Core Location afterwards.
+                return locationSet
             } else {
                 return ok
             }
@@ -216,6 +246,7 @@ enum LocationEngine {
     /// A fresh developer session: tunnel handshake, RemoteXPC, the simulation
     /// service. Leaves `locationSimulation` set on success.
     private static func connectLocked(pairingPath: String, deviceIP: String) -> Int32 {
+        idevice_set_global_timeout(5)
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(49152).bigEndian

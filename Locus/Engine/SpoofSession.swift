@@ -4,10 +4,12 @@ import Foundation
 import MapKit
 import UIKit
 import UserNotifications
+import AVFoundation
 
 enum SpoofStatus: Equatable {
     case idle
     case connecting
+    case verifying
     case active
     case reconnecting
     case dropped(String)
@@ -16,7 +18,8 @@ enum SpoofStatus: Equatable {
         switch self {
         case .idle: return "Not Spoofing"
         case .connecting: return "Starting…"
-        case .active: return "Spoofing"
+        case .active: return "Simulation confirmée"
+        case .verifying: return "Vérification en cours"
         case .reconnecting: return "Reconnecting…"
         case .dropped: return "Interrupted"
         }
@@ -197,6 +200,20 @@ final class SpoofSession: ObservableObject {
     private let recentsKey = "locus.recents"
 
     private var cancellables = Set<AnyCancellable>()
+    @Published private(set) var lastConfirmedAt: Date?
+    @Published private(set) var isRecovering = false
+    @Published private(set) var isChangingDestination = false
+    private var verification = SimulationVerification()
+    private var commandGeneration = 0
+    private var commandInFlight = false
+    private var isStopping = false
+    private var recoveryTask: Task<Void, Never>?
+    private var backgroundBudgetExpired = false
+    private var backgroundTaskRequested = false
+    private var failureNotified = false
+    private var lastEvidenceLog = Date.distantPast
+    private var currentResumeState: RouteResumeState?
+    private var monitoringStartedAt = Date.distantFuture
 
     /// Shared so App Intents — which run in this process but outside the view
     /// hierarchy — can reach the same session the UI is showing.
@@ -234,10 +251,25 @@ final class SpoofSession: ObservableObject {
         if LocationBackend.current == .direct, let record = DirectSimulationRecord.load() {
             simulated = record.coordinate
             pin = record.coordinate
-            status = .active
+            status = .verifying
             activeBackend = .direct
             timeZoneAnchor = record.coordinate
         }
+        if simulated == nil, let record = HeldPositionRecord.load() {
+            simulated = record.coordinate.clLocation
+            pin = simulated
+            status = .verifying
+        }
+        LocationProbe.shared.$reading
+            .sink { [weak self] reading in
+                if let reading { self?.observe(reading) }
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { _ in SessionDiagnostics.shared.record("Changement de route audio détecté; cause de perte non déterminée") }
+            .store(in: &cancellables)
+        SessionDiagnostics.shared.record("Ouverture de Locus Next; état à vérifier")
     }
 
     /// Holds the display awake while there is something moving on it.
@@ -293,8 +325,11 @@ final class SpoofSession: ObservableObject {
     var simulatedAddress: String? { places.address(for: simulated) }
 
     var isSpoofing: Bool {
+        if simulated != nil { return true }
+        if status.isDropped { return true }
         if case .active = status { return true }
         if case .reconnecting = status { return true }
+        if case .verifying = status { return true }
         return false
     }
 
@@ -326,11 +361,16 @@ final class SpoofSession: ObservableObject {
     // MARK: - Teleport
 
     func teleport(to coordinate: CLLocationCoordinate2D, pairing: PairingStore) {
-        guard isReady(pairing) else { return }
+        guard !isStopping, isReady(pairing) else { return }
+        cancelRoute(settle: false)
+        stopJoystick(settle: false)
+        invalidateCommands()
+        let generation = commandGeneration
         setPin(coordinate)
         Task { [weak self] in
             guard let self else { return }
             guard await self.prepareTunnel() else { return }
+            guard generation == self.commandGeneration, !self.isStopping else { return }
             await self.apply(coordinate, pairing: pairing, markRecent: true, interactive: true)
         }
     }
@@ -348,6 +388,9 @@ final class SpoofSession: ObservableObject {
     /// The same, awaited. For callers that report an outcome — the Siri intent
     /// shouldn't say "back to your real location" before it is.
     func stopAndWait(pairing: PairingStore) async {
+        guard !isStopping else { return }
+        isStopping = true
+        invalidateCommands()
         // No settling here: a "stationary" fix sent on the way out could land
         // after the clear and put the location straight back.
         cancelRoute(settle: false)
@@ -355,6 +398,7 @@ final class SpoofSession: ObservableObject {
         stopResend()
         stopHealth()
         isBusy = true
+        while commandInFlight { try? await Task.sleep(nanoseconds: 50_000_000) }
         // Cleared through whichever engine set it — the Settings switch is
         // locked while spoofing, but a location restored from a previous launch
         // was set by the direct engine whatever the switch says now.
@@ -376,6 +420,7 @@ final class SpoofSession: ObservableObject {
             )
         }
         finishStop(result, engine: engine)
+        isStopping = false
     }
 
     private func finishStop(_ result: Result<Void, LocationEngineError>, engine: LocationBackend) {
@@ -386,6 +431,10 @@ final class SpoofSession: ObservableObject {
             simulated = nil
             status = .idle
             activeBackend = nil
+            verification.reset()
+            LocationProbe.shared.monitorSession(false)
+            HeldPositionRecord.clear()
+            SessionDiagnostics.shared.record("Arrêt demandé accepté par le moteur")
             lastFixWasMoving = false
             if engine == .direct { DirectSimulationRecord.clear() }
             // Back to the real place, so back to its time zone.
@@ -416,7 +465,7 @@ final class SpoofSession: ObservableObject {
         let coordinate = CLLocationCoordinate2D(latitude: running.latitude, longitude: running.longitude)
         simulated = coordinate
         setPin(coordinate)
-        status = .active
+        status = .verifying
         beginBackground()
         startResend(pairing: pairing)
         startHealth(pairing: pairing)
@@ -497,15 +546,26 @@ final class SpoofSession: ObservableObject {
     /// keeping alive, so when nothing is moving there is no reason to keep the
     /// GPS and the app running in the background for it.
     func sceneDidEnterBackground() {
+        checkpointRoute()
+        SessionDiagnostics.shared.record("Passage en arrière-plan; exécution soumise à iOS")
         guard backend.persistsOnItsOwn, !isRouting, !joystickActive else { return }
         locationKeeper.stop()
         keeperPausedForBackground = true
     }
 
     func sceneWillEnterForeground() {
-        guard keeperPausedForBackground else { return }
-        keeperPausedForBackground = false
-        locationKeeper.start()
+        backgroundBudgetExpired = false
+        endBackground()
+        backgroundTaskRequested = false
+        SessionDiagnostics.shared.record("Retour au premier plan; nouvelle vérification")
+        if keeperPausedForBackground {
+            keeperPausedForBackground = false
+            locationKeeper.start()
+        }
+        if simulated != nil, !verification.isFresh(at: Date()) {
+            status = .verifying
+            retrySimulation()
+        }
     }
 
     /// Start lightweight GPS updates for the map puck / locate button.
@@ -530,6 +590,15 @@ final class SpoofSession: ObservableObject {
         guard backend.needsTunnel else { return true }
 
         let controller = TunnelController.shared
+        if NextBuild.usesExternalTunnel {
+            // Never create, replace or stop LocalDevVPN's configuration.
+            let reachable = await controller.probe()
+            if !reachable {
+                lastError = "LocalDevVPN ne répond pas. Vérifiez sa connexion, puis réessayez."
+                SessionDiagnostics.shared.record("Service Developer inaccessible via LocalDevVPN")
+            }
+            return reachable
+        }
 
         // Network mode brings its own tunnel up inside `NetworkSpoofer.set`, and
         // only Locus' own will do — pointing someone at LocalDevVPN here would
@@ -558,19 +627,20 @@ final class SpoofSession: ObservableObject {
     // MARK: - Joystick
 
     func startJoystick(pairing: PairingStore) {
-        guard isReady(pairing) else { return }
+        guard !isStopping, isReady(pairing) else { return }
         let start = simulated ?? pin ?? realCoordinate
         guard let start else {
             lastError = "Drop a pin or teleport somewhere before using the joystick."
             return
         }
         cancelRoute(settle: false)
+        let generation = commandGeneration
         Task { [weak self] in
             guard let self else { return }
             guard await self.prepareTunnel() else { return }
-            if self.simulated == nil {
-                await self.apply(start, pairing: pairing, markRecent: false, interactive: true)
-            }
+            guard generation == self.commandGeneration, !self.isStopping else { return }
+            guard await self.apply(start, pairing: pairing, markRecent: false, interactive: true),
+                  await self.waitForConfirmation(generation: generation) else { return }
             self.joystickActive = true
             self.joystick = JoystickTelemetry()
             self.refreshIdleTimer()
@@ -590,6 +660,7 @@ final class SpoofSession: ObservableObject {
     /// - Parameter settle: report the location as stationary once the stick is
     ///   gone. Off when something else is about to send a fix of its own.
     func stopJoystick(settle: Bool = true) {
+        if joystickActive { invalidateCommands() }
         joystickActive = false
         joystickVector = .zero
         joystick = nil
@@ -627,7 +698,8 @@ final class SpoofSession: ObservableObject {
     }
 
     private func tickJoystick(pairing: PairingStore) async {
-        guard joystickActive, let current = simulated else { return }
+        guard joystickActive, !commandInFlight, !isRecovering, !isStopping,
+              verification.isFresh(at: Date()), let current = simulated else { return }
         let magnitude = hypot(joystickVector.dx, joystickVector.dy)
 
         // Stick centred: still report, so the readout says "stopped" instead of
@@ -636,7 +708,7 @@ final class SpoofSession: ObservableObject {
             joystick?.speed = 0
             joystick?.course = nil
             // Released: one stationary fix, so apps stop reading the last speed.
-            if lastFixWasMoving {
+            if lastFixWasMoving || Date().timeIntervalSince(verification.commands.last?.sentAt ?? .distantPast) >= 5 {
                 await apply(current, pairing: pairing, markRecent: false, motion: .stationary)
             }
             return
@@ -654,11 +726,11 @@ final class SpoofSession: ObservableObject {
         let next = Geo.offset(current, east: nx * meters, north: ny * meters)
 
         let course = Geo.bearing(from: current, to: next)
-        joystick?.speed = speed
-        joystick?.course = course
-        joystick?.distance += meters
-
-        await apply(next, pairing: pairing, markRecent: false, motion: Motion(speed: speed, course: course))
+        if await apply(next, pairing: pairing, markRecent: false, motion: Motion(speed: speed, course: course)), joystickActive {
+            joystick?.speed = speed
+            joystick?.course = course
+            joystick?.distance += meters
+        }
     }
 
     // MARK: - Routes
@@ -680,23 +752,25 @@ final class SpoofSession: ObservableObject {
         // an interrupted "As recorded" drive came back at a generic pace.
         recordedTimes: [Date]? = nil,
         startingAt startDistance: CLLocationDistance = 0,
-        roads: [RoadSegment] = []
+        roads: [RoadSegment] = [],
+        startingLap: Int = 1,
+        restoredPlan: RoutePlan? = nil,
+        restoredWalker: DriveWalkerSnapshot? = nil,
+        restoredProfile: DriveProfile? = nil
     ) {
-        guard isReady(pairing) else { return }
+        guard !isStopping, isReady(pairing) else { return }
         guard coordinates.count >= 2 else {
             lastError = "Build or draw a route first."
             return
         }
 
-        cancelRoute(settle: false)
-        stopJoystick(settle: false)
         // The pin is about to move every second; an address for where it
         // started would only go stale and mislead.
         places.clear()
 
-        let profile = activeProfile
+        let profile = restoredProfile ?? activeProfile
         let mode = travelMode
-        let basePlan = RouteSimulator.plan(
+        let basePlan = restoredPlan ?? RouteSimulator.plan(
             coordinates: coordinates,
             profile: profile,
             mode: mode,
@@ -709,6 +783,9 @@ final class SpoofSession: ObservableObject {
             lastError = "That route is too short to drive."
             return
         }
+        cancelRoute(settle: false)
+        stopJoystick(settle: false)
+        invalidateCommands()
 
         isRoutePaused = false
         routeStartedAt = Date()
@@ -727,6 +804,19 @@ final class SpoofSession: ObservableObject {
 
         routeGeneration += 1
         let generation = routeGeneration
+        var initialState = RouteResumeState(
+            routeName: name, coordinates: coordinates.codable,
+            expectedTravelTime: expectedSpeed.map { basePlan.totalDistance / max($0, 0.1) } ?? 0,
+            distance: basePlan.totalDistance, recordedTimes: recordedTimes, roads: roads,
+            overrides: overrides, travelled: startDistance, lap: max(1, startingLap), profileID: profile.id
+        )
+        initialState.scenarioID = UUID()
+        initialState.travelMode = mode
+        initialState.profileSnapshot = profile
+        initialState.planSnapshot = SavedRoutePlan(basePlan)
+        initialState.walkerSnapshot = restoredWalker
+        currentResumeState = initialState
+        checkpointRoute()
 
         routeTask = Task { [weak self] in
             // Set inside the task, after `routeTask` is assigned: `isRouting`
@@ -735,42 +825,33 @@ final class SpoofSession: ObservableObject {
             self?.refreshIdleTimer()
             guard let self else { return }
             guard await self.prepareTunnel() else {
-                self.finishRoute(generation: generation)
+                self.finishRoute(generation: generation, completed: false)
                 return
             }
+            guard generation == self.routeGeneration, !Task.isCancelled else { return }
             await self.countDown(seconds: profile.startDelaySeconds)
+            var completed = false
             if !Task.isCancelled {
-                await self.run(
+                completed = await self.run(
                     plan: basePlan,
                     profile: profile,
                     pairing: pairing,
-                    resume: RouteResumeState(
-                        routeName: name,
-                        coordinates: coordinates.codable,
-                        expectedTravelTime: expectedSpeed.map { basePlan.totalDistance / max($0, 0.1) } ?? 0,
-                        distance: basePlan.totalDistance,
-                        recordedTimes: recordedTimes,
-                        roads: roads,
-                        overrides: overrides,
-                        travelled: 0,
-                        lap: 1,
-                        profileID: profile.id
-                    ),
+                    resume: initialState,
                     startDistance: startDistance
                 )
             }
-            self.finishRoute(generation: generation)
+            self.finishRoute(generation: generation, completed: completed)
         }
     }
 
-    private func finishRoute(generation: Int) {
+    private func finishRoute(generation: Int, completed: Bool) {
         guard generation == routeGeneration else { return }
 
         // Arriving is the one moment of a drive worth marking, and it used to
         // be the one that showed nothing: the HUD simply vanished after forty
         // minutes. Only for a drive that actually reached the end — a cancel
         // bumps the generation and never gets here.
-        if let telemetry, telemetry.distanceTravelled > 50 {
+        if completed, let telemetry, telemetry.distanceTravelled > 0 {
             lastTrip = TripSummary(
                 routeName: lastRouteName,
                 distance: telemetry.distanceTravelled,
@@ -790,16 +871,33 @@ final class SpoofSession: ObservableObject {
         routeCountdown = nil
         LiveActivityController.shared.end()
         // A route that reached its end has nothing left to resume.
-        routeStore.clearResume()
+        if completed {
+            routeStore.clearResume()
+            currentResumeState = nil
+            if verification.isFresh(at: Date()) {
+                postSessionEvent("Arrivée", body: "Destination atteinte. La dernière position reste demandée à iOS.")
+            }
+        } else {
+            checkpointRoute()
+        }
+        if let simulated { HeldPositionRecord.save(simulated) }
         refreshIdleTimer()
         settleMotion()
     }
 
-    func pauseRoute() { isRoutePaused = true }
-    func resumeRoute() { isRoutePaused = false }
+    func pauseRoute() {
+        isRoutePaused = true
+        currentResumeState?.paused = true
+        checkpointRoute()
+    }
+    func resumeRoute() {
+        isRoutePaused = false
+        currentResumeState?.paused = false
+        checkpointRoute()
+    }
 
     func toggleRoutePause() {
-        isRoutePaused.toggle()
+        if isRoutePaused { resumeRoute() } else { pauseRoute() }
         // Pausing is one of the few changes worth an immediate Live Activity
         // push rather than waiting out the throttle.
         if let telemetry, activeProfile.showLiveActivity {
@@ -817,6 +915,7 @@ final class SpoofSession: ObservableObject {
     /// - Parameter settle: report the location as stationary where the drive
     ///   stopped. Off when something else is about to send a fix of its own.
     func cancelRoute(keepResumePoint: Bool = false, settle: Bool = true) {
+        invalidateCommands()
         routeGeneration += 1
         routeTask?.cancel()
         routeTask = nil
@@ -825,7 +924,11 @@ final class SpoofSession: ObservableObject {
         routeCountdown = nil
         wasOverLimit = false
         LiveActivityController.shared.end()
-        if !keepResumePoint { routeStore.clearResume() }
+        if !keepResumePoint {
+            routeStore.clearResume()
+            currentResumeState = nil
+        }
+        if let simulated { HeldPositionRecord.save(simulated) }
         refreshIdleTimer()
         if settle { settleMotion() }
     }
@@ -834,6 +937,7 @@ final class SpoofSession: ObservableObject {
     /// stopped.
     func resumeSavedRoute(pairing: PairingStore) {
         guard let state = routeStore.resumable else { return }
+        if let mode = state.travelMode { travelMode = mode }
         if let profileID = state.profileID, profileID != drive.id {
             selectProfile(profileID)
         }
@@ -850,8 +954,53 @@ final class SpoofSession: ObservableObject {
             recordedSpeed: route.recordedSpeedSampler(),
             recordedTimes: state.recordedTimes,
             startingAt: state.travelled,
-            roads: state.roads
+            roads: state.roads,
+            startingLap: state.lap,
+            restoredPlan: state.planSnapshot?.restored,
+            restoredWalker: state.walkerSnapshot,
+            restoredProfile: state.profileSnapshot
         )
+    }
+
+    /// Pause first, finish the in-flight command, then route from its accepted
+    /// coordinate. A failed directions request preserves the old scenario.
+    func changeDestination(to destination: CLLocationCoordinate2D, pairing: PairingStore) {
+        guard !isStopping, !isRecovering, !isChangingDestination, simulated != nil,
+              isReady(pairing), CLLocationCoordinate2DIsValid(destination) else { return }
+        let generation = routeGeneration
+        let wasRunning = isRouting && !isRoutePaused
+        if isRouting { pauseRoute() }
+        stopJoystick()
+        isChangingDestination = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isChangingDestination = false }
+            while self.commandInFlight {
+                guard generation == self.routeGeneration, !self.isStopping else { return }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard let start = self.simulated, generation == self.routeGeneration, !self.isStopping else { return }
+            do {
+                let routes = try await RouteBuilder.roadRoutes(from: start, to: destination,
+                                                              mode: self.travelMode, alternatives: false)
+                guard generation == self.routeGeneration, !self.isStopping else { return }
+                guard let route = routes.first else { throw CancellationError() }
+                self.startRoute(route.coordinates, pairing: pairing, expectedSpeed: route.expectedSpeed,
+                                name: route.name, roads: route.roads)
+                SessionDiagnostics.shared.record("Destination modifiée sans effacer la simulation")
+            } catch {
+                guard generation == self.routeGeneration, !self.isStopping else { return }
+                self.lastError = "Impossible de calculer ce trajet. Le parcours précédent est conservé."
+                if wasRunning { self.resumeRoute() }
+            }
+        }
+    }
+
+    func holdPosition() {
+        guard simulated != nil, !isStopping else { return }
+        cancelRoute()
+        stopJoystick()
+        flash("Position fixe demandée — surveillance active lorsque iOS le permet")
     }
 
     private func countDown(seconds: Double) async {
@@ -872,23 +1021,42 @@ final class SpoofSession: ObservableObject {
         pairing: PairingStore,
         resume template: RouteResumeState,
         startDistance: CLLocationDistance
-    ) async {
+    ) async -> Bool {
         let dt = profile.updateInterval
 
         var current = plan
-        var lap = 1
+        var lap = max(1, template.lap)
         var offset = startDistance
+        var snapshot = template.walkerSnapshot
         var lastProgressWrite = Date.distantPast
 
-        while !Task.isCancelled {
-            let walker = DriveWalker(plan: current, profile: profile, startDistance: offset)
-            offset = 0
+        // Establish and verify the starting position before moving the clock.
+        let startWalker = DriveWalker(plan: current, profile: profile, startDistance: offset, snapshot: snapshot)
+        let startPoint = startWalker.currentFix.coordinate
+        let sent = await apply(startPoint, pairing: pairing, markRecent: false)
+        var confirmed = false
+        if sent { confirmed = await waitForConfirmation(generation: commandGeneration) }
+        if !confirmed {
+            guard await awaitRecovery(pairing: pairing, coordinate: startPoint) else { return false }
+        }
+        guard !Task.isCancelled else { return false }
+        postSessionEvent("Trajet lancé", body: "La position initiale est confirmée. Le trajet commence.")
 
-            while !Task.isCancelled, let fix = walker.step(dt: dt) {
+        while !Task.isCancelled {
+            let walker = DriveWalker(plan: current, profile: profile, startDistance: offset, snapshot: snapshot)
+            let savedPlan = SavedRoutePlan(current)
+            offset = 0
+            snapshot = nil
+
+            while !Task.isCancelled {
                 while isRoutePaused, !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else { return false }
+                if !verification.isFresh(at: Date()) || isRecovering {
+                    guard await awaitRecovery(pairing: pairing, coordinate: simulated ?? startPoint) else { return false }
+                }
+                guard let fix = walker.step(dt: dt) else { break }
 
                 // Read from the live profile rather than the snapshot taken at
                 // the start: the time scale is the one dial worth moving while
@@ -901,12 +1069,13 @@ final class SpoofSession: ObservableObject {
                 // cover ground four times as fast, and a reported speed that
                 // disagreed with the distance between them would be the
                 // inconsistency an app notices.
-                await apply(
-                    fix.coordinate,
-                    pairing: pairing,
-                    markRecent: false,
-                    motion: fix.isStopped ? .stationary : Motion(speed: fix.speed * scale, course: fix.course)
-                )
+                let tickStarted = ProcessInfo.processInfo.systemUptime
+                while !(await apply(fix.coordinate, pairing: pairing, markRecent: false,
+                                    motion: fix.isStopped ? .stationary : Motion(speed: fix.speed * scale, course: fix.course))) {
+                    guard !Task.isCancelled,
+                          await awaitRecovery(pairing: pairing, coordinate: fix.coordinate) else { return false }
+                }
+                guard !Task.isCancelled else { return false }
                 telemetry = DriveTelemetry(
                     speed: fix.speed,
                     speedLimit: fix.speedLimit,
@@ -943,23 +1112,40 @@ final class SpoofSession: ObservableObject {
 
                 // Written every few seconds rather than on a clean exit, so a
                 // crash or a swipe-away can still be picked up where it left off.
-                if Date().timeIntervalSince(lastProgressWrite) >= 5 {
+                var state = template
+                state.travelled = fix.distanceTravelled
+                state.lap = lap
+                state.savedAt = Date()
+                state.planSnapshot = savedPlan
+                state.walkerSnapshot = walker.snapshot
+                state.paused = isRoutePaused
+                currentResumeState = state
+                if Date().timeIntervalSince(lastProgressWrite) >= 5 || fix.isStopped {
                     lastProgressWrite = Date()
-                    var state = template
-                    state.travelled = fix.distanceTravelled
-                    state.lap = lap
-                    state.savedAt = Date()
                     routeStore.recordProgress(state)
                 }
 
-                try? await Task.sleep(nanoseconds: UInt64((dt / scale) * 1_000_000_000))
+                let remaining = max(0, dt / scale - (ProcessInfo.processInfo.systemUptime - tickStarted))
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return false }
+
+            // A fresh confirmation for the endpoint is required before the
+            // checkpoint is discarded or arrival is announced.
+            verification.reset()
+            let endpoint = current.points[current.points.count - 1].coordinate
+            let endpointSent = await apply(endpoint, pairing: pairing, markRecent: false)
+            var endpointConfirmed = false
+            if endpointSent { endpointConfirmed = await waitForConfirmation(generation: commandGeneration) }
+            if !endpointConfirmed {
+                guard await awaitRecovery(pairing: pairing, coordinate: endpoint) else { return false }
+            }
+            guard !Task.isCancelled else { return false }
 
             switch profile.endBehavior {
             case .stop:
-                return
+                return true
             case .loop:
                 lap += 1
                 // Straight back to the start line — the jump is a teleport, the
@@ -970,12 +1156,13 @@ final class SpoofSession: ObservableObject {
                 current = current.reversed()
                 continue
             case .reverseOnce:
-                guard lap == 1 else { return }
+                guard lap == 1 else { return true }
                 lap += 1
                 current = current.reversed()
                 continue
             }
         }
+        return false
     }
 
     /// Formats telemetry for the Live Activity.
@@ -1204,27 +1391,49 @@ final class SpoofSession: ObservableObject {
     ///   sets it true and false again several times a second — two published
     ///   changes per fix, each of which invalidates every view watching the
     ///   session, including the map and its route overlay.
+    @discardableResult
     private func apply(
         _ coordinate: CLLocationCoordinate2D,
         pairing: PairingStore,
         markRecent: Bool,
         interactive: Bool = false,
-        motion: Motion? = nil
-    ) async {
+        motion: Motion? = nil,
+        recovering: Bool = false
+    ) async -> Bool {
+        let generation = commandGeneration
+        guard !isStopping, !Task.isCancelled, !backgroundBudgetExpired,
+              CLLocationCoordinate2DIsValid(coordinate),
+              recovering || !isRecovering else { return false }
+        while commandInFlight {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard generation == commandGeneration, !Task.isCancelled, !isStopping else { return false }
+        }
+        guard generation == commandGeneration else { return false }
+        commandInFlight = true
+        defer { commandInFlight = false }
         if status == .idle || status.isDropped {
             status = .connecting
         }
         let engine = backend
         if interactive { isBusy = true }
+        let sentAt = Date()
+        if verification.commands.isEmpty { monitoringStartedAt = sentAt }
+        LocationProbe.shared.monitorSession(true)
         let result = await send(coordinate, through: engine, motion: motion, pairing: pairing)
         if interactive { isBusy = false }
+        guard generation == commandGeneration, !Task.isCancelled, !isStopping else { return false }
         switch result {
         case .success:
             simulated = coordinate
-            pin = coordinate
-            status = .active
+            // Keep a map/search selection intact while the route or hold timer
+            // sends updates, so it can become the next destination.
+            if markRecent || pin == nil { pin = coordinate }
+            verification.sent(MapDatumMode.current.toWGS84(coordinate), at: sentAt)
+            if let reading = LocationProbe.shared.reading { observe(reading) }
+            status = verification.isFresh(at: Date()) ? .active : (recovering ? .reconnecting : .verifying)
             lastError = nil
             activeBackend = engine
+            if markRecent { HeldPositionRecord.save(coordinate) }
             lastFixWasMoving = engine == .direct && (motion?.speed ?? 0) > 0.05
             locationKeeper.start()
             followTimeZone(to: coordinate, force: markRecent)
@@ -1259,17 +1468,18 @@ final class SpoofSession: ObservableObject {
                           ? "Set to \(suggestedFavoriteName(for: coordinate)) — GPS can pull it back; Both holds it"
                           : "Set to \(suggestedFavoriteName(for: coordinate)) — asking iOS to look again")
                 } else {
-                    flash("Now at \(suggestedFavoriteName(for: coordinate))")
+                    flash("Position envoyée — vérification en cours")
                 }
             }
+            return true
         case .failure(let error):
             lastError = error.localizedDescription
-            if simulated != nil {
-                status = .dropped(error.localizedDescription)
-                postDropNotification(error.localizedDescription)
-            } else {
-                status = .idle
+            status = .dropped(error.localizedDescription)
+            SessionDiagnostics.shared.record("Échec moteur: \(error.diagnosticCode)")
+            if !recovering {
+                beginRecovery(at: markRecent ? coordinate : (simulated ?? coordinate), pairing: pairing)
             }
+            return false
         }
     }
 
@@ -1285,8 +1495,9 @@ final class SpoofSession: ObservableObject {
                 guard let self, let sim = self.simulated else { return }
                 // A route re-sends far more often than this on its own; resending
                 // underneath it would fight the walker for the current fix.
-                guard !self.isRouting else { return }
-                _ = await self.send(sim, through: .tunnel, motion: nil, pairing: pairing)
+                guard (!self.isRouting || self.isRoutePaused), !self.joystickActive, !self.isRecovering,
+                      !self.status.isDropped, !self.isStopping else { return }
+                await self.apply(sim, pairing: pairing, markRecent: false)
             }
         }
     }
@@ -1308,17 +1519,16 @@ final class SpoofSession: ObservableObject {
 
     private func startHealth(pairing: PairingStore) {
         guard healthTimer == nil else { return }
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let sim = self.simulated else { return }
-                // Only the tunnel engine's session can die under it.
-                guard self.activeBackend == .tunnel else { return }
-                if case .dropped = self.status {
-                    self.status = .reconnecting
-                    await self.apply(sim, pairing: pairing, markRecent: false)
-                } else if !LocationEngine.isSessionActive, self.isSpoofing {
-                    self.status = .reconnecting
-                    await self.apply(sim, pairing: pairing, markRecent: false)
+                guard !self.isRecovering, !self.isStopping, !self.status.isDropped else { return }
+                if !self.verification.isFresh(at: Date()) {
+                    self.status = .verifying
+                    let reference = self.verification.confirmedAt ?? self.monitoringStartedAt
+                    if Date().timeIntervalSince(reference) > 12 {
+                        self.beginRecovery(at: sim, pairing: pairing)
+                    }
                 }
             }
         }
@@ -1358,8 +1568,16 @@ final class SpoofSession: ObservableObject {
     }
 
     private func beginBackground() {
-        guard backgroundTask == .invalid else { return }
+        guard backgroundTask == .invalid, !backgroundBudgetExpired, !backgroundTaskRequested else { return }
+        backgroundTaskRequested = true
         backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+            self?.checkpointRoute()
+            self?.backgroundBudgetExpired = true
+            self?.recoveryTask?.cancel()
+            self?.recoveryTask = nil
+            self?.isRecovering = false
+            if self?.simulated != nil { self?.status = .verifying }
+            SessionDiagnostics.shared.record("Temps d’exécution supplémentaire expiré; récupération différée")
             self?.endBackground()
         }
     }
@@ -1387,10 +1605,10 @@ final class SpoofSession: ObservableObject {
 
     private func postDropNotification(_ message: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Locus spoof dropped"
+        content.title = "Locus Next — simulation à vérifier"
         content.body = message
         content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: "locus.next.session.failure", content: content, trigger: nil)
 
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
@@ -1407,6 +1625,148 @@ final class SpoofSession: ObservableObject {
                 // Denied. The status bar and the in-app alert still say so.
                 break
             }
+        }
+    }
+}
+
+extension SpoofSession {
+    private func invalidateCommands() {
+        commandGeneration += 1
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        isRecovering = false
+        verification.reset()
+        monitoringStartedAt = Date()
+        failureNotified = false
+        if simulated != nil { status = .verifying }
+    }
+
+    private func observe(_ reading: LocationProbe.Reading) {
+        // A fresh location callback is an actual execution opportunity granted
+        // by iOS, unlike a timer that merely survived in memory.
+        if abs(Date().timeIntervalSince(reading.timestamp)) < 2 { backgroundBudgetExpired = false }
+        guard !isStopping, !status.isDropped || isRecovering else { return }
+        if let confirmed = verification.confirmedAt,
+           reading.timestamp > confirmed, reading.horizontalAccuracy >= 0,
+           reading.horizontalAccuracy <= 100, reading.isSimulatedBySoftware == false {
+            verification.reset()
+            status = .verifying
+            SessionDiagnostics.shared.record("Core Location signale une position non simulée")
+        }
+        if verification.observe(coordinate: reading.coordinate, timestamp: reading.timestamp,
+                                accuracy: reading.horizontalAccuracy,
+                                simulated: reading.isSimulatedBySoftware, now: Date()) {
+            lastConfirmedAt = verification.confirmedAt
+            status = .active
+            if Date().timeIntervalSince(lastEvidenceLog) > 30 {
+                lastEvidenceLog = Date()
+                SessionDiagnostics.shared.record("Position simulée confirmée par Core Location")
+            }
+        }
+    }
+
+    private func waitForConfirmation(generation: Int, seconds: TimeInterval = 8) async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + seconds
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            guard !Task.isCancelled, generation == commandGeneration,
+                  !isStopping, !backgroundBudgetExpired else { return false }
+            if verification.isFresh(at: Date()) { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
+    func retrySimulation() {
+        guard !isStopping, !isRecovering, let coordinate = simulated ?? pin else { return }
+        beginRecovery(at: coordinate, pairing: PairingStore.shared)
+    }
+
+    private func beginRecovery(at coordinate: CLLocationCoordinate2D, pairing: PairingStore) {
+        guard !isStopping, !isRecovering, !backgroundBudgetExpired else { return }
+        commandGeneration += 1
+        let generation = commandGeneration
+        verification.reset()
+        monitoringStartedAt = Date()
+        status = .reconnecting
+        isRecovering = true
+        checkpointRoute()
+        SessionDiagnostics.shared.record("Récupération commencée; scénario suspendu")
+        if !failureNotified {
+            failureNotified = true
+            postDropNotification("La simulation n’est plus confirmée. Tentatives de reconnexion en cours.")
+        }
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.commandGeneration == generation {
+                    self.recoveryTask = nil
+                    self.isRecovering = false
+                }
+            }
+            let detectedAt = ProcessInfo.processInfo.systemUptime
+            for (index, offset) in RecoverySchedule.offsets.enumerated() {
+                while ProcessInfo.processInfo.systemUptime < detectedAt + offset || self.commandInFlight {
+                    guard self.recoveryAllowed(generation) else { return }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard self.recoveryAllowed(generation) else { return }
+                SessionDiagnostics.shared.record("Tentative de reconnexion \(index + 1)/3")
+                self.verification.reset()
+                if self.backend == .tunnel { await LocationEngine.disconnectSession() }
+                guard self.recoveryAllowed(generation) else { return }
+                guard await self.prepareTunnel() else { continue }
+                guard self.recoveryAllowed(generation) else { return }
+                let sent = await self.apply(coordinate, pairing: pairing, markRecent: false, recovering: true)
+                guard self.recoveryAllowed(generation) else { return }
+                if sent, await self.waitForConfirmation(generation: generation) {
+                    self.status = .active
+                    self.lastError = nil
+                    self.failureNotified = false
+                    SessionDiagnostics.shared.record("Connexion rétablie et position confirmée")
+                    self.postSessionEvent("Connexion rétablie", body: "La position simulée vient d’être vérifiée par iOS.")
+                    return
+                }
+            }
+            guard self.recoveryAllowed(generation) else { return }
+            self.status = .dropped("Simulation non confirmée après trois tentatives")
+            self.lastError = "Vérifiez LocalDevVPN et les autorisations de localisation. Une initialisation sur Wi-Fi peut être nécessaire."
+            self.verification.reset()
+            self.checkpointRoute()
+            SessionDiagnostics.shared.record("Trois tentatives épuisées; reprise manuelle nécessaire")
+            self.postDropNotification("Trois tentatives n’ont pas permis de confirmer la simulation. Ouvrez Locus Next et vérifiez LocalDevVPN.")
+        }
+    }
+
+    private func recoveryAllowed(_ generation: Int) -> Bool {
+        !Task.isCancelled && generation == commandGeneration && !isStopping && !backgroundBudgetExpired
+    }
+
+    /// Waits without advancing the walker or issuing more location commands.
+    private func awaitRecovery(pairing: PairingStore, coordinate: CLLocationCoordinate2D) async -> Bool {
+        if !isRecovering, !status.isDropped {
+            beginRecovery(at: simulated ?? coordinate, pairing: pairing)
+        }
+        while isRecovering {
+            guard !Task.isCancelled, !isStopping, !backgroundBudgetExpired else { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return !Task.isCancelled && verification.isFresh(at: Date()) && !status.isDropped
+    }
+
+    private func checkpointRoute() {
+        guard var state = currentResumeState else { return }
+        state.savedAt = Date()
+        routeStore.recordProgress(state)
+    }
+
+    private func postSessionEvent(_ title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Locus Next — \(title)"
+        content.body = body
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            center.add(UNNotificationRequest(identifier: "locus.next.event.\(title)", content: content, trigger: nil))
         }
     }
 }

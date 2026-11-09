@@ -71,7 +71,7 @@ enum CoordinateParser {
 
         // locus://teleport?lat=…&lon=…&name=…  — our own, and the one a
         // Shortcut or another app can build by hand.
-        if scheme == "locus" {
+        if scheme == "locus" || scheme == "locusnext" {
             if let match = fromLatLonItems(items) { return match }
         }
 

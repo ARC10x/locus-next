@@ -53,15 +53,30 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 interfaceSection
+                Section("Locus Next") {
+                    NavigationLink("Simulation et diagnostics") { SessionDiagnosticsView() }
+                }
                 locationSection
                 // The direct engine needs none of these. Shown again the
                 // moment it is switched off, since then they are what makes a
                 // teleport work.
                 if session.backend.needsTunnel {
-                    methodSection
+                    if !NextBuild.usesExternalTunnel { methodSection }
                     pairingSection
-                    tunnelSection
-                    if showTunnelAdvanced { tunnelAdvancedSection }
+                    if NextBuild.usesExternalTunnel {
+                        Section("LocalDevVPN externe") {
+                            Text("Mode Developer · cible 10.7.0.1")
+                            Text("Conservez vos réglages LocalDevVPN : Tunnel IP 10.7.0.2/30, Device IP 10.7.0.1/32.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                            Button("Ouvrir LocalDevVPN") { LocalDevVPN.openInstalled() }
+                            Button("Tester l’accès au service Developer") { Task { await tunnel.runProbe() } }
+                            Text("La disponibilité du tunnel ne confirme pas à elle seule la simulation.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    } else {
+                        tunnelSection
+                        if showTunnelAdvanced { tunnelAdvancedSection }
+                    }
                 }
                 proSection
                 drivingSection
