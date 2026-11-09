@@ -29,13 +29,13 @@ final class X509BuilderTests: XCTestCase {
     }
 
     #if canImport(Security)
-    /// The real test: iOS has to accept the chain. A certificate that parses but
-    /// fails name-constraint or key-usage checks would only show itself on a
-    /// phone, as "the spoof doesn't work", so build both and let Security judge.
-    func testLeafChainsToAuthorityAndIsConstrainedToTheLocationHosts() throws {
+    /// Validate the builder's chain, key usage and hostname checks with an
+    /// isolated fixture. Apple service domains have system pinning policies;
+    /// a custom test root cannot prove that those services accept interception.
+    func testLeafChainsToAuthorityAndRejectsOtherNames() throws {
         let authority = try makeKey()
         let leaf = try makeKey()
-        let hosts = InterceptConfig.hosts
+        let hosts = ["location.example.test", "location-cn.example.test"]
         let now = Date()
 
         func signer(_ key: SecKey) -> ([UInt8]) throws -> [UInt8] {
@@ -92,7 +92,7 @@ final class X509BuilderTests: XCTestCase {
             return [UInt8](sig as Data)
         }
         let caDER = try X509Builder.certificate(
-            role: .authority(permittedDNS: ["gs-loc.apple.com"]), serial: [1], subjectCN: "A", issuerCN: "A",
+            role: .authority(permittedDNS: ["location.example.test"]), serial: [1], subjectCN: "A", issuerCN: "A",
             notBefore: now.addingTimeInterval(-60), notAfter: now.addingTimeInterval(86_400),
             subjectPublicKey: try publicPoint(authority), subjectKeyID: [1], authorityKeyID: nil, sign: sign)
         let rogue = try X509Builder.certificate(

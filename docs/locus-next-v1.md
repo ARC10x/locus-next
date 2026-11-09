@@ -68,6 +68,12 @@ Le workflow exécute les XCTest de logique sur macOS, compile pour iPhone,
 vérifie l'identifiant séparé, le schéma d'URL et l'absence d'extensions, puis
 archive l'IPA. Il ne publie aucune release et ne modifie pas `main`.
 
+Les tests de certificats hérités vérifient le constructeur et les contraintes
+DNS sur des domaines fictifs `.test`. Ils ne démontrent pas l'acceptation d'un
+certificat tiers par les services Apple : macOS refuse cette chaîne pour les
+domaines Apple avec l'erreur de pinning `-67880`. Aucune protection système
+n'est désactivée. Le mode réseau intégré concerné n'est pas utilisé dans cette V1.
+
 Tests sur iPhone à effectuer avant de qualifier cette version de stable :
 
 1. Importer un RPPairing valide, puis essayer un fichier invalide : le valide
