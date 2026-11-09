@@ -26,6 +26,7 @@ struct RootView: View {
             LocusGlassGroup(spacing: 16) {
                 VStack(spacing: 10) {
                     tripSummary
+                    FlightHUDView()
 
                     if let telemetry = session.telemetry, session.activeProfile.showHUD {
                         DriveHUDView(
@@ -241,7 +242,7 @@ struct StatusBarView: View {
     private var display: Display {
         switch session.status {
         case .connecting: return .spoof("Connecting…")
-        case .verifying: return .spoof("Vérification en cours…")
+        case .verifying: return .spoof("Vérification en attente…")
         case .active:
             // Network mode is only "spoofing" once iOS has actually been handed
             // a rewritten reply; before that, say what it's waiting for.
@@ -520,6 +521,7 @@ struct BottomControlsView: View {
     @EnvironmentObject private var pairing: PairingStore
     @Binding var showSettings: Bool
     @Binding var showPlaces: Bool
+    @State private var showFlight = false
 
     @Namespace private var modeSelection
 
@@ -579,6 +581,7 @@ struct BottomControlsView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: session.joystickActive)
         .animation(.snappy, value: session.travelMode)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: session.isRouting)
+        .sheet(isPresented: $showFlight) { FlightSetupView() }
     }
 
     /// Segmented by hand rather than a `Picker`, so the selection can slide
@@ -607,6 +610,9 @@ struct BottomControlsView: View {
                 .accessibilityLabel(mode.title)
             }
             Spacer(minLength: 0)
+            Button { showFlight = true } label: {
+                Label("Vol", systemImage: "airplane")
+            }
         }
         .padding(3)
         .background(Capsule().fill(Color.primary.opacity(0.06)))

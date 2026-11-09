@@ -47,6 +47,15 @@ struct SimulationVerification {
         guard let confirmedAt else { return false }
         return (0...Self.freshness).contains(now.timeIntervalSince(confirmedAt))
     }
+
+    /// Silence is lack of evidence, never evidence of a broken transport.
+    /// Only a recent, accurate real fix after this session's confirmation
+    /// establishes that iOS has stopped reporting our simulated location.
+    func observesRealPosition(timestamp: Date, accuracy: Double, simulated: Bool?, now: Date) -> Bool {
+        guard let confirmedAt else { return false }
+        return timestamp > confirmedAt && (0...Self.freshness).contains(now.timeIntervalSince(timestamp))
+            && accuracy.isFinite && (0...100).contains(accuracy) && simulated == false
+    }
 }
 
 enum RecoverySchedule {

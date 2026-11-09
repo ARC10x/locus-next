@@ -102,5 +102,10 @@ final class LocationProbe: NSObject, ObservableObject, CLLocationManagerDelegate
         Task { @MainActor in self.authorization = status }
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        let code = (error as NSError).code
+        Task { @MainActor in
+            SessionDiagnostics.shared.record("Core Location: erreur code \(code)")
+        }
+    }
 }

@@ -19,7 +19,7 @@ enum SpoofStatus: Equatable {
         case .idle: return "Not Spoofing"
         case .connecting: return "Starting…"
         case .active: return "Simulation confirmée"
-        case .verifying: return "Vérification en cours"
+        case .verifying: return "Vérification en attente"
         case .reconnecting: return "Reconnecting…"
         case .dropped: return "Interrupted"
         }
@@ -203,6 +203,15 @@ final class SpoofSession: ObservableObject {
     @Published private(set) var lastConfirmedAt: Date?
     @Published private(set) var isRecovering = false
     @Published private(set) var isChangingDestination = false
+    @Published var flightConfiguration = FlightConfiguration()
+    @Published var flightPoints: [Coordinate2D?] = Array(repeating: nil, count: 6)
+    @Published private(set) var flightFix: FlightFix?
+    @Published private(set) var flightPath: [CLLocationCoordinate2D] = []
+    @Published private(set) var isFlightPaused = false
+    @Published private(set) var savedFlight = FlightCheckpoint.load()
+    private var flightTask: Task<Void, Never>?
+    private var flightGeneration = 0
+    private var currentFlightPlan: FlightPlan?
     private var verification = SimulationVerification()
     private var commandGeneration = 0
     private var commandInFlight = false
@@ -335,7 +344,8 @@ final class SpoofSession: ObservableObject {
         return false
     }
 
-    var isRouting: Bool { routeTask != nil }
+    var isRouting: Bool { routeTask != nil || flightTask != nil }
+    var isFlying: Bool { flightTask != nil }
 
     /// The engine a teleport would use right now.
     var backend: LocationBackend { LocationBackend.current }
@@ -551,6 +561,7 @@ final class SpoofSession: ObservableObject {
     /// GPS and the app running in the background for it.
     func sceneDidEnterBackground() {
         checkpointRoute()
+        checkpointFlight()
         SessionDiagnostics.shared.record("Passage en arrière-plan; exécution soumise à iOS")
         guard backend.persistsOnItsOwn, !isRouting, !joystickActive else { return }
         locationKeeper.stop()
@@ -568,7 +579,9 @@ final class SpoofSession: ObservableObject {
         }
         if simulated != nil, !verification.isFresh(at: Date()) {
             status = .verifying
-            retrySimulation()
+            // Refresh the existing session first. Missing callbacks while
+            // locked do not justify tearing down a working developer channel.
+            reapplyCurrentLocation()
         }
     }
 
@@ -597,8 +610,11 @@ final class SpoofSession: ObservableObject {
         if NextBuild.usesExternalTunnel {
             // Never create, replace or stop LocalDevVPN's configuration.
             let reachable = await controller.probe()
+            SessionDiagnostics.shared.record(reachable
+                ? "LocalDevVPN: connexion TCP Developer réussie"
+                : "LocalDevVPN: connexion TCP Developer impossible (avant appairage)")
             if !reachable {
-                lastError = "LocalDevVPN ne répond pas. Vérifiez sa connexion, puis réessayez."
+                lastError = "Le service Developer ne répond pas via LocalDevVPN (10.7.0.1:49152). Vérifiez que LocalDevVPN est actif. Si cela arrive uniquement en 5G, essayez une initialisation en Wi-Fi, puis exportez les diagnostics après le passage en réseau mobile."
                 SessionDiagnostics.shared.record("Service Developer inaccessible via LocalDevVPN")
             }
             return reachable
@@ -737,6 +753,116 @@ final class SpoofSession: ObservableObject {
             joystick?.course = course
             joystick?.distance += meters
         }
+    }
+
+    // MARK: - Independent flight simulation
+
+    func startFlight(_ configuration: FlightConfiguration, elapsed: Double = 0) {
+        guard !isStopping, isReady(PairingStore.shared) else { return }
+        let plan: FlightPlan
+        do { plan = try FlightPlan(configuration) }
+        catch { lastError = error.localizedDescription; return }
+        guard elapsed.isFinite, (0...plan.duration).contains(elapsed) else { return }
+        cancelRoute(settle: false)
+        stopJoystick(settle: false)
+        currentFlightPlan = plan
+        flightPath = plan.legs.flatMap { leg in
+            (0...20).map { FlightPlan.interpolate(leg.from, leg.to, fraction: Double($0) / 20) }
+        }
+        flightConfiguration = configuration
+        flightPoints = configuration.points.map { Optional($0) }
+        flightFix = plan.fix(at: elapsed)
+        isFlightPaused = false
+        let generation = flightGeneration
+        checkpointFlight()
+        flightTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == self.flightGeneration {
+                    self.flightTask = nil
+                    self.refreshIdleTimer()
+                }
+            }
+            let pairing = PairingStore.shared
+            guard await self.prepareTunnel(), generation == self.flightGeneration, !Task.isCancelled else { return }
+            var clock = elapsed
+            var lastSave = elapsed
+            var phase: FlightPhase?
+            guard await self.apply(plan.fix(at: clock).coordinate, pairing: pairing, markRecent: false)
+                    || self.isRecovering else { return }
+            while generation == self.flightGeneration, !Task.isCancelled, !self.isStopping {
+                let tick = ProcessInfo.processInfo.systemUptime
+                guard await self.awaitRecovery(pairing: pairing, coordinate: plan.fix(at: clock).coordinate) else {
+                    self.checkpointFlight(); return
+                }
+                guard generation == self.flightGeneration, !Task.isCancelled else { return }
+                if self.isFlightPaused {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    continue
+                }
+                let next = min(plan.duration, clock + 1)
+                let fix = plan.fix(at: next)
+                guard await self.apply(fix.coordinate, pairing: pairing, markRecent: false) else {
+                    if self.isRecovering { continue }
+                    self.checkpointFlight(); return
+                }
+                guard generation == self.flightGeneration, !Task.isCancelled else { return }
+                clock = next
+                self.flightFix = fix
+                if fix.phase != phase {
+                    phase = fix.phase
+                    SessionDiagnostics.shared.record("Phase aérienne: \(fix.phase.rawValue)")
+                    self.checkpointFlight()
+                }
+                if clock - lastSave >= 5 { self.checkpointFlight(); lastSave = clock }
+                if clock >= plan.duration {
+                    self.verification.reset()
+                    guard await self.apply(fix.coordinate, pairing: pairing, markRecent: false)
+                            || self.isRecovering else { return }
+                    guard await self.awaitRecovery(pairing: pairing, coordinate: fix.coordinate),
+                          generation == self.flightGeneration, !Task.isCancelled else { return }
+                    FlightCheckpoint.clear()
+                    self.savedFlight = nil
+                    self.currentFlightPlan = nil
+                    HeldPositionRecord.save(fix.coordinate)
+                    self.postSessionEvent("Vol simulé terminé", body: "La position au terminal vient d’être confirmée.")
+                    return
+                }
+                let delay = max(0.02, 1 - (ProcessInfo.processInfo.systemUptime - tick))
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+        refreshIdleTimer()
+    }
+
+    func toggleFlightPause() {
+        guard isFlying else { return }
+        isFlightPaused.toggle()
+        checkpointFlight()
+    }
+
+    func resumeFlightCheckpoint() {
+        guard let savedFlight else { return }
+        startFlight(savedFlight.configuration, elapsed: savedFlight.elapsed)
+    }
+
+    private func checkpointFlight() {
+        guard let plan = currentFlightPlan, let fix = flightFix else { return }
+        let checkpoint = FlightCheckpoint(configuration: plan.configuration, elapsed: fix.elapsed, savedAt: Date())
+        checkpoint.save()
+        savedFlight = checkpoint
+    }
+
+    private func cancelFlight(keepResumePoint: Bool = false) {
+        if keepResumePoint { checkpointFlight() }
+        flightGeneration += 1
+        flightTask?.cancel()
+        flightTask = nil
+        flightFix = nil
+        flightPath = []
+        currentFlightPlan = nil
+        isFlightPaused = false
+        if !keepResumePoint { FlightCheckpoint.clear(); savedFlight = nil }
     }
 
     // MARK: - Routes
@@ -926,6 +1052,7 @@ final class SpoofSession: ObservableObject {
     /// - Parameter settle: report the location as stationary where the drive
     ///   stopped. Off when something else is about to send a fix of its own.
     func cancelRoute(keepResumePoint: Bool = false, settle: Bool = true) {
+        cancelFlight(keepResumePoint: keepResumePoint)
         invalidateCommands()
         routeGeneration += 1
         routeTask?.cancel()
@@ -1519,7 +1646,7 @@ final class SpoofSession: ObservableObject {
                 guard let self, let sim = self.simulated else { return }
                 // A route re-sends far more often than this on its own; resending
                 // underneath it would fight the walker for the current fix.
-                guard (!self.isRouting || self.isRoutePaused), !self.joystickActive, !self.isRecovering,
+                guard (!self.isRouting || self.isRoutePaused || self.isFlightPaused), !self.joystickActive, !self.isRecovering,
                       !self.commandInFlight, !self.isBusy, !self.status.isDropped, !self.isStopping else { return }
                 await self.apply(sim, pairing: pairing, markRecent: false)
             }
@@ -1545,14 +1672,12 @@ final class SpoofSession: ObservableObject {
         guard healthTimer == nil else { return }
         healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let sim = self.simulated else { return }
+                guard let self, self.simulated != nil else { return }
                 guard !self.isRecovering, !self.isStopping, !self.status.isDropped else { return }
                 if !self.verification.isFresh(at: Date()) {
                     self.status = .verifying
-                    let reference = self.verification.confirmedAt ?? self.monitoringStartedAt
-                    if Date().timeIntervalSince(reference) > 12 {
-                        self.beginRecovery(at: sim, pairing: pairing)
-                    }
+                    // A stationary, locked phone may stop delivering fixes.
+                    // Keep the confirmation honest without reconnecting on silence.
                 }
             }
         }
@@ -1596,6 +1721,7 @@ final class SpoofSession: ObservableObject {
         backgroundTaskRequested = true
         backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
             self?.checkpointRoute()
+            self?.checkpointFlight()
             self?.backgroundBudgetExpired = true
             self?.recoveryTask?.cancel()
             self?.recoveryTask = nil
@@ -1670,12 +1796,17 @@ extension SpoofSession {
         // by iOS, unlike a timer that merely survived in memory.
         if abs(Date().timeIntervalSince(reading.timestamp)) < 2 { backgroundBudgetExpired = false }
         guard !isStopping, !status.isDropped || isRecovering else { return }
-        if let confirmed = verification.confirmedAt,
-           reading.timestamp > confirmed, reading.horizontalAccuracy >= 0,
-           reading.horizontalAccuracy <= 100, reading.isSimulatedBySoftware == false {
+        if verification.observesRealPosition(timestamp: reading.timestamp,
+                                            accuracy: reading.horizontalAccuracy,
+                                            simulated: reading.isSimulatedBySoftware, now: Date()) {
             verification.reset()
             status = .verifying
             SessionDiagnostics.shared.record("Core Location signale une position non simulée")
+            let generation = commandGeneration
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.commandGeneration, let coordinate = self.simulated else { return }
+                self.beginRecovery(at: coordinate, pairing: PairingStore.shared)
+            }
         }
         if verification.observe(coordinate: reading.coordinate, timestamp: reading.timestamp,
                                 accuracy: reading.horizontalAccuracy,
@@ -1767,11 +1898,16 @@ extension SpoofSession {
 
     /// Waits without advancing the walker or issuing more location commands.
     private func awaitRecovery(pairing: PairingStore, coordinate: CLLocationCoordinate2D) async -> Bool {
-        if !isRecovering, !status.isDropped {
-            beginRecovery(at: simulated ?? coordinate, pairing: pairing)
-        }
-        while isRecovering {
+        var lastRefresh = Date.distantPast
+        while !verification.isFresh(at: Date()) || isRecovering {
             guard !Task.isCancelled, !isStopping, !backgroundBudgetExpired else { return false }
+            if status.isDropped, !isRecovering { return false }
+            if !isRecovering, Date().timeIntervalSince(lastRefresh) >= 8 {
+                lastRefresh = Date()
+                // An actual send failure starts bounded recovery in apply.
+                // Otherwise wait for fresh proof without changing the scenario clock.
+                _ = await apply(simulated ?? coordinate, pairing: pairing, markRecent: false)
+            }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         return !Task.isCancelled && verification.isFresh(at: Date()) && !status.isDropped

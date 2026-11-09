@@ -137,6 +137,8 @@ targets:
       - path: Locus/Engine/RouteSimulator.swift
       - path: Locus/Engine/RouteStorage.swift
       - path: Locus/Engine/SimulationVerification.swift
+      - path: Locus/Engine/FlightPlan.swift
+      - path: Locus/Engine/FlightCheckpoint.swift
       - path: Locus/Engine/RouteCheckpoint.swift
     settings:
       base:

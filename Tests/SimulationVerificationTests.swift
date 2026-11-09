@@ -40,4 +40,20 @@ final class SimulationVerificationTests: XCTestCase {
                                         timestamp: sentAt.addingTimeInterval(1), accuracy: 5,
                                         simulated: true, now: sentAt.addingTimeInterval(1)))
     }
+
+    func testSilenceAndCachedRealReadingsDoNotProveAnInterruption() {
+        var evidence = SimulationVerification()
+        evidence.sent(position, at: sentAt)
+        _ = evidence.observe(coordinate: position, timestamp: sentAt.addingTimeInterval(1),
+                             accuracy: 5, simulated: true, now: sentAt.addingTimeInterval(1))
+        let now = sentAt.addingTimeInterval(60)
+        XCTAssertFalse(evidence.isFresh(at: now))
+        XCTAssertFalse(evidence.observesRealPosition(timestamp: sentAt.addingTimeInterval(2),
+                                                    accuracy: 5, simulated: false, now: now))
+        XCTAssertFalse(evidence.observesRealPosition(timestamp: now, accuracy: 5, simulated: nil, now: now))
+        XCTAssertFalse(evidence.observesRealPosition(timestamp: now, accuracy: 500, simulated: false, now: now))
+        XCTAssertTrue(evidence.observesRealPosition(timestamp: now, accuracy: 5, simulated: false, now: now))
+        evidence.reset()
+        XCTAssertFalse(evidence.observesRealPosition(timestamp: now, accuracy: 5, simulated: false, now: now))
+    }
 }
