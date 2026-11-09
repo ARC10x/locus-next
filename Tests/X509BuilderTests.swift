@@ -62,17 +62,22 @@ final class X509BuilderTests: XCTestCase {
         let ca = try XCTUnwrap(SecCertificateCreateWithData(nil, caDER as CFData), "authority is not valid DER")
         let cert = try XCTUnwrap(SecCertificateCreateWithData(nil, leafDER as CFData), "leaf is not valid DER")
 
-        func evaluate(_ host: String) -> Bool {
+        func evaluate(_ host: String) -> (valid: Bool, detail: String) {
             var trust: SecTrust?
             SecTrustCreateWithCertificates([cert, ca] as CFArray, SecPolicyCreateSSL(true, host as CFString), &trust)
-            guard let trust else { return false }
+            guard let trust else { return (false, "could not create trust") }
             SecTrustSetAnchorCertificates(trust, [ca] as CFArray)
             SecTrustSetAnchorCertificatesOnly(trust, true)
-            return SecTrustEvaluateWithError(trust, nil)
+            var error: CFError?
+            let valid = SecTrustEvaluateWithError(trust, &error)
+            return (valid, String(describing: error))
         }
 
-        for host in hosts { XCTAssertTrue(evaluate(host), "\(host) should validate") }
-        XCTAssertFalse(evaluate("example.com"), "leaf must not be valid for other names")
+        for host in hosts {
+            let result = evaluate(host)
+            XCTAssertTrue(result.valid, "\(host) should validate: \(result.detail)")
+        }
+        XCTAssertFalse(evaluate("example.com").valid, "leaf must not be valid for other names")
     }
 
     func testAuthorityCannotVouchForAnythingOutsideItsConstraint() throws {
