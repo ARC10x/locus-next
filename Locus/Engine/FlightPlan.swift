@@ -21,9 +21,16 @@ enum AircraftProfile: String, CaseIterable, Codable, Identifiable {
 }
 
 enum FlightPhase: String, Codable, CaseIterable {
+    case waiting, drive, briefing, transfer, boarding, walk
     case taxiOut, alignment, takeoff, climb, cruise, descent, approach, landing, taxiIn, arrived
     var title: String {
         switch self {
+        case .waiting: return "Attente au domicile"
+        case .drive: return "Trajet vers Orly"
+        case .briefing: return "Préparation équipage"
+        case .transfer: return "Accès à l’avion"
+        case .boarding: return "Préparation à bord"
+        case .walk: return "Promenade"
         case .taxiOut: return "Roulage départ"
         case .alignment: return "Alignement"
         case .takeoff: return "Décollage"
@@ -48,12 +55,19 @@ enum FlightSpeedUnit: String, CaseIterable, Identifiable {
 }
 
 struct FlightConfiguration: Codable, Equatable {
+    var modelVersion: Int? = 2
     var aircraft: AircraftProfile = .b737
     var cruiseKPH: Double = 840
     var altitudeMetres: Double = 11000
     var durationMinutes: Double = 0 // zero selects the model duration
     // Terminal departure, runway start/end, arrival threshold/end, terminal arrival.
     var points: [Coordinate2D] = []
+    var taxiOut: [Coordinate2D]?
+    var taxiIn: [Coordinate2D]?
+    var airWaypoints: [Coordinate2D]?
+    var groundStages: [FlightGroundStage]?
+    var scenarioTitle: String?
+    var groundOnly: Bool?
     static let pointLabels = ["Terminal départ", "Début piste départ", "Fin piste départ",
                               "Seuil piste arrivée", "Fin piste arrivée", "Terminal arrivée"]
 }
@@ -83,11 +97,15 @@ struct FlightPlan {
         let startAltitude: Double
         let endAltitude: Double
         let seconds: Double
+        var path: FlightPolyline? = nil
+        var samples: [FlightGroundSample]? = nil
+        var track: [CLLocationCoordinate2D] {
+            samples?.map { $0.point.clLocation } ?? path?.points ?? [from, to]
+        }
     }
     let configuration: FlightConfiguration
     let legs: [Leg]
     let duration: Double
-    let timeStretch: Double
 
     init(_ config: FlightConfiguration) throws {
         guard config.points.count == 6,
@@ -107,41 +125,81 @@ struct FlightPlan {
         }
         let c = config.cruiseKPH / 3.6
         let airDistance = Geo.distance(p[2], p[3])
-        let top = Self.destination(p[2], bearing: Geo.bearing(from: p[1], to: p[2]), metres: min(160000, airDistance * 0.2))
+        let departureVector = Self.destination(p[2], bearing: Geo.bearing(from: p[1], to: p[2]), metres: min(15000, airDistance * 0.15))
         let approach = Self.destination(p[3], bearing: Geo.bearing(from: p[4], to: p[3]), metres: min(15000, airDistance * 0.1))
-        let descent = Self.interpolate(top, approach, fraction: 0.75)
+        let approachVector = Self.destination(p[3], bearing: Geo.bearing(from: p[4], to: p[3]), metres: min(40000, airDistance * 0.18))
+        let waypoints = (config.airWaypoints ?? []).map(\.clLocation)
+        guard waypoints.count <= 100, waypoints.allSatisfy(CLLocationCoordinate2DIsValid) else {
+            throw Invalid(message: "Points de passage aériens invalides.")
+        }
+        let airPath = FlightPolyline.rounded([p[2], departureVector] + waypoints + [approachVector, approach], trim: min(12000, airDistance * 0.04))
+        let climbPath = airPath.slice(0, airPath.length * 0.25)
+        let cruisePath = airPath.slice(airPath.length * 0.25, airPath.length * 0.75)
+        let descentPath = airPath.slice(airPath.length * 0.75, airPath.length)
+        let top = climbPath.points.last!, descent = descentPath.points.first!
         let approachHeight = min(500, Geo.distance(approach, p[3]) / 76 * 5)
         // Short flights cannot plausibly reach long-haul cruising altitude.
-        let h = min(config.altitudeMetres, 15 + Geo.distance(p[2], top) / ((78 + c) / 2) * 12,
-                    approachHeight + Geo.distance(descent, approach) / ((c + 80) / 2) * 10)
+        let h = min(config.altitudeMetres, 15 + climbPath.length / ((78 + c) / 2) * 12,
+                    approachHeight + descentPath.length / ((c + 80) / 2) * 10)
         var result: [Leg] = []
         func add(_ phase: FlightPhase, _ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D,
-                 _ v0: Double, _ v1: Double, _ h0: Double, _ h1: Double, dwell: Double = 0) {
-            let length = Geo.distance(a, b)
+                 _ v0: Double, _ v1: Double, _ h0: Double, _ h1: Double, dwell: Double = 0, path: FlightPolyline? = nil) {
+            let length = path?.length ?? Geo.distance(a, b)
             let seconds = dwell > 0 ? dwell : length / max(0.1, (v0 + v1) / 2)
             if seconds > 0.001 {
                 result.append(Leg(phase: phase, from: a, to: b, startSpeed: v0, endSpeed: v1,
-                                  startAltitude: h0, endAltitude: h1, seconds: seconds))
+                                  startAltitude: h0, endAltitude: h1, seconds: seconds, path: path))
             }
         }
-        add(.taxiOut, p[0], p[1], 0, 0, 0, 0, dwell: max(1, Geo.distance(p[0], p[1]) / 5))
+        var previous: CLLocationCoordinate2D?
+        guard (config.groundStages?.count ?? 0) <= 64 else { throw Invalid(message: "Trop d’étapes terrestres.") }
+        for stage in config.groundStages ?? [] {
+            guard stage.samples.count >= 2, stage.samples.count <= 86402,
+                  stage.samples.first!.seconds == 0, stage.duration > 0, stage.duration <= 172800,
+                  stage.samples.allSatisfy({ CLLocationCoordinate2DIsValid($0.point.clLocation) && $0.seconds.isFinite && $0.speed.isFinite && (0...100).contains($0.speed) }),
+                  zip(stage.samples, stage.samples.dropFirst()).allSatisfy({ $0.1.seconds > $0.0.seconds }),
+                  [.waiting, .drive, .briefing, .transfer, .boarding, .walk].contains(stage.phase) else {
+                throw Invalid(message: "Étape terrestre invalide.")
+            }
+            let first = stage.samples.first!.point.clLocation, last = stage.samples.last!.point.clLocation
+            if let previous, Geo.distance(previous, first) > 2 { throw Invalid(message: "Les étapes terrestres ne sont pas raccordées.") }
+            result.append(Leg(phase: stage.phase, from: first, to: last, startSpeed: 0, endSpeed: 0,
+                              startAltitude: 0, endAltitude: 0, seconds: stage.duration, samples: stage.samples))
+            previous = last
+        }
+        if config.groundOnly == true {
+            guard !result.isEmpty else { throw Invalid(message: "Le parcours terrestre est vide.") }
+            configuration = config; legs = result; duration = result.reduce(0) { $0 + $1.seconds }
+            return
+        }
+        if let previous, Geo.distance(previous, p[0]) > 2 { throw Invalid(message: "L’accès à l’avion doit rejoindre le stationnement de départ.") }
+        func taxi(_ raw: [Coordinate2D]?, from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) throws -> FlightPolyline {
+            let points = raw?.map(\.clLocation) ?? [from, to]
+            guard (2...2000).contains(points.count), points.allSatisfy(CLLocationCoordinate2DIsValid),
+                  Geo.distance(points.first!, from) < 2, Geo.distance(points.last!, to) < 2 else {
+                throw Invalid(message: "Le roulage doit relier le stationnement et la piste.")
+            }
+            return FlightPolyline.rounded(points, trim: 12)
+        }
+        let taxiOut = try taxi(config.taxiOut, from: p[0], to: p[1])
+        let taxiIn = try taxi(config.taxiIn, from: p[4], to: p[5])
+        add(.taxiOut, p[0], p[1], 0, 0, 0, 0, dwell: max(1, taxiOut.length / 5), path: taxiOut)
         add(.alignment, p[1], p[1], 0, 0, 0, 0, dwell: 10)
         add(.takeoff, p[1], p[2], 0, 78, 0, 15)
-        add(.climb, p[2], top, 78, c, 15, h)
-        add(.cruise, top, descent, c, c, h, h)
-        add(.descent, descent, approach, c, 80, h, approachHeight)
+        add(.climb, p[2], top, 78, c, 15, h, path: climbPath)
+        add(.cruise, top, descent, c, c, h, h, path: cruisePath)
+        add(.descent, descent, approach, c, 80, h, approachHeight, path: descentPath)
         add(.approach, approach, p[3], 80, 72, approachHeight, 0)
         add(.landing, p[3], p[4], 72, 0, 0, 0)
-        add(.taxiIn, p[4], p[5], 0, 0, 0, 0, dwell: max(1, Geo.distance(p[4], p[5]) / 5))
+        add(.taxiIn, p[4], p[5], 0, 0, 0, 0, dwell: max(1, taxiIn.length / 5), path: taxiIn)
         let minimum = result.reduce(0) { $0 + $1.seconds }
         let requested = config.durationMinutes * 60
-        guard requested == 0 || requested >= minimum else {
-            throw Invalid(message: "Durée trop courte pour cette distance et cette vitesse : minimum \(Int(ceil(minimum / 60))) minutes.")
+        guard requested == 0 || abs(requested - minimum) < 0.001 else {
+            throw Invalid(message: "La durée doit être calculée depuis le parcours et les vitesses. Choisissez 0 (automatique), puis démarrez un nouveau vol. Une ancienne sauvegarde avec durée imposée ne peut pas être reprise sans modifier sa progression.")
         }
         configuration = config
         legs = result
-        duration = requested > 0 ? requested : minimum
-        timeStretch = duration / minimum
+        duration = minimum
     }
 
     /// One bounded first movement can trigger a fresh fix when a stationary
@@ -166,22 +224,41 @@ struct FlightPlan {
             return FlightFix(coordinate: legs.last!.to, phase: .arrived, speed: 0, altitude: 0,
                              verticalSpeed: 0, course: 0, elapsed: duration, progress: 1)
         }
-        var remaining = elapsed / timeStretch
+        var remaining = elapsed
         for leg in legs {
             if remaining <= leg.seconds {
                 let u = remaining / leg.seconds
+                if let samples = leg.samples {
+                    var low = 1, high = samples.count - 1
+                    while low < high {
+                        let mid = (low + high) / 2
+                        if samples[mid].seconds < remaining { low = mid + 1 } else { high = mid }
+                    }
+                    let a = samples[low - 1], b = samples[low]
+                    let f = max(0, min(1, (remaining - a.seconds) / (b.seconds - a.seconds)))
+                    return FlightFix(coordinate: Self.interpolate(a.point.clLocation, b.point.clLocation, fraction: f),
+                                     phase: leg.phase, speed: a.speed + (b.speed - a.speed) * f, altitude: 0, verticalSpeed: 0,
+                                     course: Geo.bearing(from: a.point.clLocation, to: b.point.clLocation), elapsed: elapsed, progress: elapsed / duration)
+                }
                 let taxi = leg.phase == .taxiOut || leg.phase == .taxiIn
                 // Taxi uses smoothstep position: zero speed at both ends.
                 let integral = (leg.startSpeed + leg.endSpeed) / 2
                 let fraction = taxi ? u * u * (3 - 2 * u)
                     : (integral > 0 ? (leg.startSpeed * u + 0.5 * (leg.endSpeed - leg.startSpeed) * u * u) / integral : 0)
-                let speed = taxi ? Geo.distance(leg.from, leg.to) / leg.seconds * 6 * u * (1 - u)
+                let length = leg.path?.length ?? Geo.distance(leg.from, leg.to)
+                let speed = taxi ? length / leg.seconds * 6 * u * (1 - u)
                     : leg.startSpeed + (leg.endSpeed - leg.startSpeed) * u
-                return FlightFix(coordinate: Self.interpolate(leg.from, leg.to, fraction: fraction),
-                                 phase: leg.phase, speed: speed / timeStretch,
-                                 altitude: leg.startAltitude + (leg.endAltitude - leg.startAltitude) * u,
-                                 verticalSpeed: (leg.endAltitude - leg.startAltitude) / (leg.seconds * timeStretch),
-                                 course: Geo.bearing(from: leg.from, to: leg.to), elapsed: elapsed, progress: elapsed / duration)
+                let path = leg.path ?? FlightPolyline([leg.from, leg.to])
+                let distance = length * fraction
+                // Rotation starts near the end of the acceleration, never at taxi speed.
+                let rotation = max(0, (u - 0.88) / 0.12)
+                let altitudeFraction = leg.phase == .takeoff ? rotation * rotation : u
+                let verticalFactor = leg.phase == .takeoff ? 2 * rotation / 0.12 : 1
+                return FlightFix(coordinate: path.position(distance),
+                                 phase: leg.phase, speed: speed,
+                                 altitude: leg.startAltitude + (leg.endAltitude - leg.startAltitude) * altitudeFraction,
+                                 verticalSpeed: (leg.endAltitude - leg.startAltitude) / leg.seconds * verticalFactor,
+                                 course: Geo.bearing(from: path.position(max(0, distance - 5)), to: path.position(min(length, distance + 5))), elapsed: elapsed, progress: elapsed / duration)
             }
             remaining -= leg.seconds
         }

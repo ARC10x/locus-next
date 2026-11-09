@@ -14,6 +14,12 @@ struct FlightSetupView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Scénario complet") {
+                    NavigationLink("Domicile → Orly → Dublin") { JourneySetupView() }
+                    NavigationLink("Promenade en ville") { StrollSetupView() }
+                    Text("Parcours équipage, prochain horaire simulé et départ en un bouton.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Avion") {
                     Picker("Profil", selection: $session.flightConfiguration.aircraft) {
                         ForEach(AircraftProfile.allCases) { aircraft in Text(aircraft.title).tag(aircraft) }
@@ -67,10 +73,13 @@ struct FlightSetupView: View {
                     Button("Retour à la carte") { dismiss() }
                 }
                 Section("Durée") {
-                    TextField("Minutes (0 = automatique)", value: $session.flightConfiguration.durationMinutes,
-                              format: .number)
-                        .keyboardType(.decimalPad)
-                    Text("Une durée plus longue ralentit la progression de façon cohérente. Une durée dépassant la vitesse maximale est refusée. Le parcours aérien suit un arc entre les pistes, sans données de vol réelles.")
+                    if session.flightConfiguration.durationMinutes != 0 {
+                        Button("Recalculer la durée automatiquement") {
+                            session.flightConfiguration.durationMinutes = 0
+                        }
+                        .disabled(session.isFlying)
+                    }
+                    Text("La durée est calculée depuis le parcours et les vitesses, sans ralentir le décollage ni la montée. Le parcours aérien est simulé, sans données de vol réelles.")
                         .font(.caption).foregroundStyle(.secondary)
                     if let plan = try? FlightPlan(configuration) {
                         LabeledContent("Durée prévue", value: "\(Int(ceil(plan.duration / 60))) min")
@@ -109,7 +118,12 @@ struct FlightHUDView: View {
                 HStack {
                     Label(fix.phase.title, systemImage: "airplane")
                     Spacer()
-                    Text(session.flightConfiguration.aircraft.title).font(.caption)
+                    if session.flightConfiguration.groundOnly != true {
+                        Text(session.flightConfiguration.aircraft.title).font(.caption)
+                    }
+                }
+                if let title = session.flightConfiguration.scenarioTitle {
+                    Text(title).font(.caption).foregroundStyle(.secondary)
                 }
                 ProgressView(value: fix.progress)
                 HStack {

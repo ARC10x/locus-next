@@ -769,9 +769,7 @@ final class SpoofSession: ObservableObject {
         cancelRoute(settle: false)
         stopJoystick(settle: false)
         currentFlightPlan = plan
-        flightPath = plan.legs.flatMap { leg in
-            (0...20).map { FlightPlan.interpolate(leg.from, leg.to, fraction: Double($0) / 20) }
-        }
+        flightPath = plan.legs.flatMap { $0.track }
         flightConfiguration = configuration
         flightPoints = configuration.points.map { Optional($0) }
         flightFix = plan.fix(at: elapsed)
@@ -852,7 +850,7 @@ final class SpoofSession: ObservableObject {
                     self.savedFlight = nil
                     self.currentFlightPlan = nil
                     HeldPositionRecord.save(fix.coordinate)
-                    self.postSessionEvent("Vol simulé terminé", body: "La position au terminal vient d’être confirmée.")
+                    self.postSessionEvent("Scénario terminé", body: "La position d’arrivée vient d’être confirmée.")
                     return
                 }
                 let delay = max(0.02, 1 - (ProcessInfo.processInfo.systemUptime - tick))

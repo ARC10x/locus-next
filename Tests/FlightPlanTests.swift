@@ -20,7 +20,7 @@ final class FlightPlanTests: XCTestCase {
             config.aircraft = aircraft
             config.cruiseKPH = aircraft.cruiseKPH
             let plan = try FlightPlan(config)
-            XCTAssertEqual(plan.legs.map(\.phase), Array(FlightPhase.allCases.dropLast()))
+            XCTAssertEqual(plan.legs.map(\.phase), [.taxiOut, .alignment, .takeoff, .climb, .cruise, .descent, .approach, .landing, .taxiIn])
             for t in stride(from: 0.0, through: plan.duration, by: 1) {
                 let fix = plan.fix(at: t)
                 XCTAssertTrue(CLLocationCoordinate2DIsValid(fix.coordinate))
@@ -40,7 +40,7 @@ final class FlightPlanTests: XCTestCase {
         let plan = try FlightPlan(configuration())
         var time = 0.0
         for leg in plan.legs.dropLast() {
-            time += leg.seconds * plan.timeStretch
+            time += leg.seconds
             let before = plan.fix(at: time - 0.00001), after = plan.fix(at: time + 0.00001)
             XCTAssertLessThan(Geo.distance(before.coordinate, after.coordinate), 0.02)
             XCTAssertEqual(before.speed, after.speed, accuracy: 0.01)
@@ -48,17 +48,28 @@ final class FlightPlanTests: XCTestCase {
         }
     }
 
-    func testDurationScalesProgressAndSpeedWithoutExceedingMaximum() throws {
+    func testImposedDurationCannotSlowDownFlightPhases() throws {
         var config = configuration()
         let original = try FlightPlan(config)
         config.durationMinutes = original.duration * 2 / 60
-        let stretched = try FlightPlan(config)
-        XCTAssertEqual(stretched.duration, original.duration * 2, accuracy: 0.001)
-        let a = original.fix(at: original.duration * 0.4), b = stretched.fix(at: stretched.duration * 0.4)
-        XCTAssertEqual(Geo.distance(a.coordinate, b.coordinate), 0, accuracy: 0.001)
-        XCTAssertEqual(a.speed / 2, b.speed, accuracy: 0.001)
+        XCTAssertThrowsError(try FlightPlan(config))
         config.durationMinutes = original.duration / 120
         XCTAssertThrowsError(try FlightPlan(config))
+        config.durationMinutes = 0
+        let automatic = try FlightPlan(config)
+        var elapsed = 0.0
+        for leg in automatic.legs {
+            if leg.phase == .climb {
+                XCTAssertGreaterThanOrEqual(automatic.fix(at: elapsed + 0.01).speed, 78)
+            }
+            if leg.phase == .cruise {
+                let fix = automatic.fix(at: elapsed + leg.seconds / 2)
+                XCTAssertEqual(fix.speed * 3.6, config.cruiseKPH, accuracy: 0.001)
+                let later = automatic.fix(at: elapsed + leg.seconds / 2 + 1)
+                XCTAssertEqual(Geo.distance(fix.coordinate, later.coordinate), fix.speed, accuracy: 0.1)
+            }
+            elapsed += leg.seconds
+        }
     }
 
     func testRejectsInvalidInputsAndRunways() {
@@ -90,8 +101,9 @@ final class FlightPlanTests: XCTestCase {
         let config = configuration(), plan = try FlightPlan(config)
         let takeoff = try XCTUnwrap(plan.legs.first { $0.phase == .takeoff })
         let climb = try XCTUnwrap(plan.legs.first { $0.phase == .climb })
+        let firstClimbPoints = try XCTUnwrap(climb.path).points
         XCTAssertEqual(Geo.angleDelta(Geo.bearing(from: takeoff.from, to: takeoff.to),
-                                     Geo.bearing(from: climb.from, to: climb.to)), 0, accuracy: 0.1)
+                                     Geo.bearing(from: firstClimbPoints[0], to: firstClimbPoints[1])), 0, accuracy: 0.1)
         let approach = try XCTUnwrap(plan.legs.first { $0.phase == .approach })
         let landing = try XCTUnwrap(plan.legs.first { $0.phase == .landing })
         XCTAssertEqual(Geo.angleDelta(Geo.bearing(from: approach.from, to: approach.to),
