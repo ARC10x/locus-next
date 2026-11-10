@@ -26,7 +26,7 @@ enum FlightPhase: String, Codable, CaseIterable {
     var title: String {
         switch self {
         case .waiting: return "Attente au domicile"
-        case .drive: return "Trajet vers Orly"
+        case .drive: return "Trajet en voiture"
         case .briefing: return "Préparation équipage"
         case .transfer: return "Accès à l’avion"
         case .boarding: return "Préparation à bord"
@@ -69,6 +69,7 @@ struct FlightConfiguration: Codable, Equatable {
     var scenarioTitle: String?
     var groundOnly: Bool?
     var homeDepartureAt: Date?
+    var arrivalGroundStages: [FlightGroundStage]?
     static let pointLabels = ["Terminal départ", "Début piste départ", "Fin piste départ",
                               "Seuil piste arrivée", "Fin piste arrivée", "Terminal arrivée"]
 }
@@ -164,7 +165,9 @@ struct FlightPlan {
         }
         var previous: CLLocationCoordinate2D?
         guard (config.groundStages?.count ?? 0) <= 64 else { throw Invalid(message: "Trop d’étapes terrestres.") }
-        for stage in config.groundStages ?? [] {
+        func appendGround(_ stages: [FlightGroundStage]) throws {
+        guard stages.count <= 64 else { throw Invalid(message: "Trop d’étapes terrestres.") }
+        for stage in stages {
             guard stage.samples.count >= 2, stage.samples.count <= 86402,
                   stage.samples.first!.seconds == 0, stage.duration > 0, stage.duration <= 172800,
                   stage.samples.allSatisfy({ CLLocationCoordinate2DIsValid($0.point.clLocation) && $0.seconds.isFinite && $0.speed.isFinite && (0...100).contains($0.speed) }),
@@ -178,7 +181,10 @@ struct FlightPlan {
                               startAltitude: 0, endAltitude: 0, seconds: stage.duration, samples: stage.samples))
             previous = last
         }
+        }
+        try appendGround(config.groundStages ?? [])
         if config.groundOnly == true {
+            guard config.arrivalGroundStages?.isEmpty != false else { throw Invalid(message: "Un parcours terrestre doit regrouper toutes ses étapes avant le vol.") }
             guard !result.isEmpty else { throw Invalid(message: "Le parcours terrestre est vide.") }
             configuration = config; legs = result; duration = result.reduce(0) { $0 + $1.seconds }
             return
@@ -203,6 +209,8 @@ struct FlightPlan {
         add(.approach, approach, p[3], 80, 72, approachHeight, 0)
         add(.landing, p[3], p[4], 72, 0, 0, 0)
         add(.taxiIn, p[4], p[5], 0, 0, 0, 0, dwell: max(1, taxiIn.length / 5), path: taxiIn)
+        previous = p[5]
+        try appendGround(config.arrivalGroundStages ?? [])
         let minimum = result.reduce(0) { $0 + $1.seconds }
         let requested = config.durationMinutes * 60
         guard requested == 0 || abs(requested - minimum) < 0.001 else {

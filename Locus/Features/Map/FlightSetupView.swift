@@ -16,6 +16,8 @@ struct FlightSetupView: View {
             Form {
                 Section("Scénario complet") {
                     NavigationLink("Domicile → Orly → Dublin") { JourneySetupView(onStart: { dismiss() }) }
+                    NavigationLink("Dublin → Orly → domicile") { ReturnJourneyView(onStart: { dismiss() }) }
+                    NavigationLink("Bibliothèque · importer des parcours") { ScenarioLibraryView(onStart: { dismiss() }) }
                     NavigationLink("Promenade en ville") { StrollSetupView(onStart: { dismiss() }) }
                     Text("Parcours équipage, prochain horaire simulé et départ en un bouton.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -85,6 +87,9 @@ struct FlightSetupView: View {
                         LabeledContent("Durée prévue", value: "\(Int(ceil(plan.duration / 60))) min")
                     }
                     if let error { Text(error).foregroundStyle(.red) }
+                    NavigationLink("Enregistrer ou partager ce vol") {
+                        ScenarioLibraryView(candidate: configuration, onStart: { dismiss() })
+                    }
                     Button("Démarrer le vol simulé") {
                         do {
                             _ = try FlightPlan(configuration)

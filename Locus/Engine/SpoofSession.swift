@@ -221,6 +221,7 @@ final class SpoofSession: ObservableObject {
     private var recoveryTask: Task<Void, Never>?
     private var backgroundBudgetExpired = false
     private var resumeFlightOnForeground = false
+    private var resumeRoadOnForeground = false
     private var backgroundTaskRequested = false
     private var failureNotified = false
     private var lastEvidenceLog = Date.distantPast
@@ -565,6 +566,7 @@ final class SpoofSession: ObservableObject {
     func sceneDidEnterBackground() {
         checkpointRoute()
         checkpointFlight()
+        resumeRoadOnForeground = routeTask != nil && !isRoutePaused
         resumeFlightOnForeground = isFlying && !isFlightPaused
         SessionDiagnostics.shared.record("Passage en arrière-plan; exécution soumise à iOS")
         guard backend.persistsOnItsOwn, !isRouting, !joystickActive else { return }
@@ -581,6 +583,12 @@ final class SpoofSession: ObservableObject {
             keeperPausedForBackground = false
             locationKeeper.start()
         }
+        if resumeRoadOnForeground, routeTask == nil, !isStopping {
+            resumeRoadOnForeground = false
+            resumeSavedRoute(pairing: PairingStore.shared)
+            return
+        }
+        resumeRoadOnForeground = false
         if resumeFlightOnForeground, !isFlying, !isStopping, savedFlight != nil {
             resumeFlightOnForeground = false
             SessionDiagnostics.shared.record("Reprise du scénario interrompu au retour au premier plan")
@@ -1059,6 +1067,7 @@ final class SpoofSession: ObservableObject {
     }
 
     func pauseRoute() {
+        resumeRoadOnForeground = false
         isRoutePaused = true
         currentResumeState?.paused = true
         checkpointRoute()
@@ -1088,6 +1097,7 @@ final class SpoofSession: ObservableObject {
     /// - Parameter settle: report the location as stationary where the drive
     ///   stopped. Off when something else is about to send a fix of its own.
     func cancelRoute(keepResumePoint: Bool = false, settle: Bool = true) {
+        resumeRoadOnForeground = false
         cancelFlight(keepResumePoint: keepResumePoint)
         invalidateCommands()
         routeGeneration += 1
@@ -1963,10 +1973,21 @@ extension SpoofSession {
     /// Waits without advancing the walker or issuing more location commands.
     private func awaitRecovery(pairing: PairingStore, coordinate: CLLocationCoordinate2D) async -> Bool {
         var lastRefresh = Date.distantPast
-        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        var deadline = ProcessInfo.processInfo.systemUptime + 30
+        var loggedBackgroundWait = false
         while !verification.isFresh(at: Date()) || isRecovering {
             guard !Task.isCancelled, !isStopping, !backgroundBudgetExpired else { return false }
             if status.isDropped, !isRecovering { return false }
+            // Background callbacks may be delayed. Preserve the task and checkpoint;
+            // do not advance movement without proof or terminate after 30 seconds.
+            if UIApplication.shared.applicationState != .active,
+               LocationProbe.shared.supportsBackgroundExecution {
+                deadline = ProcessInfo.processInfo.systemUptime + 30
+                if !loggedBackgroundWait {
+                    loggedBackgroundWait = true
+                    SessionDiagnostics.shared.record("Scénario conservé en arrière-plan; attente de confirmation sans avancer")
+                }
+            }
             if !isRecovering, ProcessInfo.processInfo.systemUptime >= deadline {
                 let message = "Aucune position récente confirmée après 30 secondes. Le scénario est sauvegardé. Ouvrez Simulation et diagnostics pour vérifier les lectures, puis reprenez le trajet."
                 verificationIssue = message
@@ -1980,7 +2001,7 @@ extension SpoofSession {
             }
             if !isRecovering, Date().timeIntervalSince(lastRefresh) >= 8 {
                 lastRefresh = Date()
-                if UIApplication.shared.applicationState == .active { LocationProbe.shared.refresh() }
+                if UIApplication.shared.applicationState == .active || LocationProbe.shared.supportsBackgroundExecution { LocationProbe.shared.refresh() }
                 // An actual send failure starts bounded recovery in apply.
                 // Otherwise wait for fresh proof without changing the scenario clock.
                 _ = await apply(simulated ?? coordinate, pairing: pairing, markRecent: false)

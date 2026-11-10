@@ -2,6 +2,51 @@ import CoreLocation
 import XCTest
 
 final class JourneyPlanTests: XCTestCase {
+    func testReturnFlightAndHomeStagesAreContinuous() throws {
+        var config = OrlyDublinScenario.returnConfiguration
+        let stand = config.points[5]
+        let home = Coordinate2D(Geo.offset(stand.clLocation, east: 300, north: 0))
+        config.arrivalGroundStages = [.wait(at: stand, seconds: 60, phase: .transfer),
+            FlightGroundStage(phase: .drive, samples: [
+                FlightGroundSample(point: stand, seconds: 0, speed: 0),
+                FlightGroundSample(point: home, seconds: 120, speed: 0)])]
+        let plan = try FlightPlan(config)
+        XCTAssertEqual(plan.legs.last?.phase, .drive)
+        XCTAssertLessThan(Geo.distance(plan.fix(at: plan.duration).coordinate, home.clLocation), 0.01)
+        for (a, b) in zip(plan.legs, plan.legs.dropFirst()) {
+            XCTAssertLessThan(Geo.distance(a.to, b.from), 2)
+        }
+        XCTAssertEqual(config.points.first, OrlyDublinScenario.configuration.points.last)
+    }
+
+    func testReturnRejectsDisconnectedHomeStages() {
+        var config = OrlyDublinScenario.returnConfiguration
+        config.arrivalGroundStages = [.wait(at: config.points[0], seconds: 60, phase: .transfer)]
+        XCTAssertThrowsError(try FlightPlan(config))
+    }
+
+    func testScenarioImportRoundTripClearsOldSchedule() throws {
+        var config = OrlyDublinScenario.configuration
+        config.homeDepartureAt = Date()
+        config.groundStages = [.wait(at: config.points[0], seconds: 60, phase: .waiting)]
+        let file = ScenarioFile(name: "Orly Dublin", configuration: config)
+        let decoded = try ScenarioFile.decode(JSONEncoder().encode(file))
+        XCTAssertNil(decoded.configuration.homeDepartureAt)
+        XCTAssertEqual(decoded.configuration.groundStages?.count, 0)
+        XCTAssertEqual(decoded.name, "Orly Dublin")
+        XCTAssertNoThrow(try FlightPlan(decoded.configuration))
+    }
+
+    func testScenarioRejectsUnknownVersionInvalidGeometryAndOversize() throws {
+        var file = ScenarioFile(name: "Test", configuration: OrlyDublinScenario.configuration)
+        file.formatVersion = 99
+        XCTAssertThrowsError(try ScenarioFile.decode(JSONEncoder().encode(file)))
+        file.formatVersion = 1
+        file.configuration.points = []
+        XCTAssertThrowsError(try ScenarioFile.decode(JSONEncoder().encode(file)))
+        XCTAssertThrowsError(try ScenarioFile.decode(Data(repeating: 32, count: 8_000_001)))
+    }
+
     func testScheduledWaitUsesDeadlineWithoutSkippingMovement() throws {
         var config = OrlyDublinScenario.configuration
         let now = Date(timeIntervalSince1970: 10000)

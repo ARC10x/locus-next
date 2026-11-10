@@ -263,3 +263,46 @@ enum OrlyDublinScenario {
     ]
 
 }
+
+
+extension OrlyDublinScenario {
+    /// Fictional reciprocal runway use: Dublin 10R → Orly 07.
+    static var returnConfiguration: FlightConfiguration {
+        var value = configuration
+        value.points = Array(value.points.reversed())
+        value.taxiOut = configuration.taxiIn.map { Array($0.reversed()) }
+        value.taxiIn = configuration.taxiOut.map { Array($0.reversed()) }
+        value.airWaypoints = configuration.airWaypoints.map { Array($0.reversed()) }
+        value.scenarioTitle = "Dublin → Orly → domicile · simulé"
+        return value
+    }
+}
+
+
+/// Versioned, data-only route exchange. Never executes code or starts a route on import.
+struct ScenarioFile: Codable {
+    var formatVersion = 1
+    var name: String
+    var configuration: FlightConfiguration
+
+    init(name: String, configuration: FlightConfiguration) {
+        self.name = name
+        self.configuration = configuration
+        self.configuration.homeDepartureAt = nil
+        if self.configuration.groundStages?.first?.phase == .waiting {
+            self.configuration.groundStages?.removeFirst()
+        }
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        guard data.count <= 8_000_000 else { throw FlightPlan.Invalid(message: "Scénario trop volumineux (8 Mo maximum).") }
+        var file = try JSONDecoder().decode(Self.self, from: data)
+        guard file.formatVersion == 1, file.configuration.modelVersion == 2,
+              (1...120).contains(file.name.trimmingCharacters(in: .whitespacesAndNewlines).count) else {
+            throw FlightPlan.Invalid(message: "Format ou nom de scénario incompatible.")
+        }
+        file = Self(name: file.name, configuration: file.configuration)
+        _ = try FlightPlan(file.configuration)
+        return file
+    }
+}

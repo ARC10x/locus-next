@@ -46,6 +46,7 @@ struct StrollSetupView: View {
                     Map { MapPolyline(coordinates: plan.legs.flatMap { $0.track }).stroke(.green, lineWidth: 3) }
                         .frame(height: 280)
                     LabeledContent("Durée calculée, pauses incluses", value: "\(Int(ceil(plan.duration / 60))) min")
+                    NavigationLink("Enregistrer ou partager cette promenade") { ScenarioLibraryView(candidate: plan.configuration, onStart: onStart) }
                     Button("Démarrer la promenade") {
                         session.startFlight(plan.configuration)
                         if session.isFlying { onStart() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }

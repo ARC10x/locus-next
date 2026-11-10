@@ -131,6 +131,7 @@ struct JourneySetupView: View {
                 }
                 Section {
                     Link("Taxiways © OpenStreetMap · ODbL", destination: URL(string: "https://www.openstreetmap.org/copyright")!)
+                    NavigationLink("Enregistrer ou partager ce parcours") { ScenarioLibraryView(candidate: plan.configuration, onStart: onStart) }
                     Button("Démarrer le scénario complet") { launch() }
                         .disabled(session.isBusy || session.isRecovering || session.isRouting)
                     Text("La simulation se place au domicile et attend l’heure prévue. Une pause ou une suspension iOS décale la suite : aucun rattrapage par téléportation. Pause, arrêt et reprise restent disponibles.")
