@@ -30,7 +30,8 @@ enum SpoofBackend: String, CaseIterable, Identifiable {
 
     static var current: SpoofBackend {
         get {
-            UserDefaults.standard.string(forKey: defaultsKey).flatMap(SpoofBackend.init(rawValue:)) ?? .developer
+            if NextBuild.usesExternalTunnel { return .developer }
+            return UserDefaults.standard.string(forKey: defaultsKey).flatMap(SpoofBackend.init(rawValue:)) ?? .developer
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)

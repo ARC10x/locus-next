@@ -581,6 +581,7 @@ final class TunnelController: ObservableObject {
         lastProbe = reachable
             ? .reachable(milliseconds: elapsed, interface: interface)
             : .unreachable(interface: interface)
+        SessionDiagnostics.shared.record("Test TCP Developer: \(reachable ? "accessible" : "inaccessible"), \(elapsed) ms, interface détectée: \(interface)")
     }
 
     /// Opens a real TCP connection to the loopback endpoint the location engine

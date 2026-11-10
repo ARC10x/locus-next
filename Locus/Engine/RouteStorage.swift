@@ -243,14 +243,22 @@ struct RouteResumeState: Codable, Equatable, Sendable {
     var lap: Int
     var profileID: UUID?
     var savedAt = Date()
+    // Optional so existing 1.3.0 resume files remain readable.
+    var scenarioID: UUID?
+    var travelMode: TravelMode?
+    var profileSnapshot: DriveProfile?
+    var planSnapshot: SavedRoutePlan?
+    var walkerSnapshot: DriveWalkerSnapshot?
+    var paused: Bool?
 
     /// Old enough that offering to resume would be strange rather than helpful.
     var isStale: Bool { Date().timeIntervalSince(savedAt) > 60 * 60 * 12 }
 
-    /// Not worth offering to resume something that had barely started, or had
-    /// all but finished.
+    /// Even a short route, or an endpoint awaiting verification, can resume.
     var isWorthResuming: Bool {
-        travelled > 50 && distance - travelled > 100 && !isStale
+        travelled.isFinite && distance.isFinite && distance > 0
+            && travelled >= 0 && travelled <= distance && coordinates.count >= 2
+            && coordinates.allSatisfy { CLLocationCoordinate2DIsValid($0.clLocation) }
     }
 
     var built: BuiltRoute {
@@ -275,11 +283,17 @@ struct RouteProgress: Codable, Equatable, Sendable {
     var travelled: CLLocationDistance
     var lap: Int
     var savedAt: Date
+    var scenarioID: UUID?
+    var walkerSnapshot: DriveWalkerSnapshot?
+    var paused: Bool?
 
     init(_ state: RouteResumeState) {
         travelled = state.travelled
         lap = state.lap
         savedAt = state.savedAt
+        scenarioID = state.scenarioID
+        walkerSnapshot = state.walkerSnapshot
+        paused = state.paused
     }
 }
 
@@ -341,10 +355,13 @@ final class RouteStore: ObservableObject {
         var restored = Self.decode(RouteResumeState.self, from: resumeURL)
         if var state = restored,
            let progress = Self.decode(RouteProgress.self, from: progressURL),
+           progress.scenarioID == state.scenarioID,
            progress.savedAt >= state.savedAt {
             state.travelled = progress.travelled
             state.lap = progress.lap
             state.savedAt = progress.savedAt
+            state.walkerSnapshot = progress.walkerSnapshot
+            state.paused = progress.paused
             restored = state
         }
 
@@ -540,6 +557,10 @@ final class RouteStore: ObservableObject {
         rhs.lap = 0
         lhs.savedAt = .distantPast
         rhs.savedAt = .distantPast
+        lhs.walkerSnapshot = nil
+        rhs.walkerSnapshot = nil
+        lhs.paused = nil
+        rhs.paused = nil
         return lhs == rhs
     }
 

@@ -72,6 +72,10 @@ struct MapHomeView: View {
                     pinAnnotation(proxy: proxy)
                     spoofAnnotation
                     routeOverlays
+                    if session.flightPath.count > 1 {
+                        MapPolyline(coordinates: session.flightPath)
+                            .stroke(.orange, style: StrokeStyle(lineWidth: 4, dash: [8, 4]))
+                    }
                     stopAnnotations(proxy: proxy)
                 }
                 .mapStyle(mapStyle)

@@ -7,7 +7,7 @@ on:
   # No `pull_request:` trigger — a PR from a branch in this repo would build the
   # same commit twice, and the push event is the one that can publish.
   push:
-    branches: ["**"]
+    branches: ["**", "!develop/locus-next"]
     tags: ["v*"]
     # A push that only touches prose has nothing to build. (Path filters don't
     # apply to tag pushes, so a release tag always builds.)
@@ -35,6 +35,7 @@ jobs:
   # most of what this used to cost. Runs alongside `build`; `publish` waits for
   # both, so a failing test still keeps a build from being released.
   test:
+    if: github.ref != 'refs/heads/develop/locus-next'
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -60,6 +61,7 @@ jobs:
         run: swift test
 
   build:
+    if: github.ref != 'refs/heads/develop/locus-next'
     # macOS 26 for the iOS 26 SDK. Liquid Glass (`glassEffect`,
     # `GlassEffectContainer`) sits behind `#available` guards, but the symbols
     # still have to exist at build time — an Xcode 16 runner fails outright

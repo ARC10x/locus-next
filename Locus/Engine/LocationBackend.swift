@@ -20,7 +20,7 @@ enum LocationBackend: String, Equatable {
     static let preferDirectKey = "locus.direct.enabled"
 
     /// Whether this copy can use the direct engine at all.
-    static var directAvailable: Bool { DirectLocationEngine.isAvailable }
+    static var directAvailable: Bool { !NextBuild.usesExternalTunnel && DirectLocationEngine.isAvailable }
 
     /// The Settings switch. On unless turned off, so a TrollStore install needs
     /// no configuration to skip pairing and the tunnel entirely.

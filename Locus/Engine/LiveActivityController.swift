@@ -27,7 +27,7 @@ final class LiveActivityController {
     private init() {}
 
     var isSupported: Bool {
-        ActivityAuthorizationInfo().areActivitiesEnabled
+        !NextBuild.usesExternalTunnel && ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
     func start(routeName: String, profileName: String, state: DriveActivityAttributes.ContentState) {

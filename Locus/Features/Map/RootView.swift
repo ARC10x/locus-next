@@ -26,18 +26,19 @@ struct RootView: View {
             LocusGlassGroup(spacing: 16) {
                 VStack(spacing: 10) {
                     tripSummary
+                    FlightHUDView()
 
-                    if let telemetry = session.telemetry, session.drive.showHUD {
+                    if let telemetry = session.telemetry, session.activeProfile.showHUD {
                         DriveHUDView(
                             telemetry: telemetry,
-                            profile: session.drive,
+                            profile: session.activeProfile,
                             isPaused: session.isRoutePaused,
                             onTogglePause: { session.toggleRoutePause() },
                             onStop: { session.cancelRoute() },
                             // Writes through to the active profile, which the
                             // drive loop now reads every tick — so this takes
                             // effect on the next fix, not the next route.
-                            onChangeTimeScale: { session.drive.timeScale = $0 }
+                            onChangeTimeScale: { session.setPlaybackScale($0) }
                         )
                         .locusGlassID("hud", in: bottomGlass)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -90,7 +91,7 @@ struct RootView: View {
             // this does nothing at all, so it costs a check, not a VPN prompt.
             // Not when the direct engine is in use: it needs no tunnel, and
             // this would be a VPN prompt for nothing.
-            if !session.backend.needsTunnel {
+            if NextBuild.usesExternalTunnel || !session.backend.needsTunnel {
                 // Nothing to raise or reattach.
             } else if SpoofBackend.current.usesNetwork {
                 if SpoofBackend.current.usesDeveloper, tunnel.autoConnect {
@@ -241,13 +242,14 @@ struct StatusBarView: View {
     private var display: Display {
         switch session.status {
         case .connecting: return .spoof("Connecting…")
+        case .verifying: return .spoof("Vérification en attente…")
         case .active:
             // Network mode is only "spoofing" once iOS has actually been handed
             // a rewritten reply; before that, say what it's waiting for.
             if session.backend == .tunnel, SpoofBackend.current == .network, !spoofer.hasTakenEffect {
                 return .waitingForIOS
             }
-            return .spoof("Spoofing")
+            return .spoof("Simulation confirmée")
         case .reconnecting: return .spoof("Reconnecting…")
         case .dropped(let reason):
             return .spoof(reason.isEmpty ? "Disconnected" : "Disconnected — \(reason)")
@@ -295,7 +297,7 @@ struct StatusBarView: View {
             case .active:
                 return session.backend == .tunnel && SpoofBackend.current == .network && !spoofer.hasTakenEffect
                     ? LocusTheme.statusWarn : LocusTheme.statusGood
-            case .connecting, .reconnecting: return LocusTheme.statusWarn
+            case .connecting, .reconnecting, .verifying: return LocusTheme.statusWarn
             case .dropped: return LocusTheme.statusBad
             case .idle: return Color.primary.opacity(0.55)
             }
@@ -408,8 +410,8 @@ struct StatusBarView: View {
                 ? place
                 : ["Tap to nudge", place].compactMap { $0 }.joined(separator: " · ")
         case .spoof:
-            guard case .active = session.status else { return nil }
-            return placeLine
+            guard let date = session.lastConfirmedAt else { return "Aucune confirmation récente" }
+            return "Dernière confirmation : \(date.formatted(date: .omitted, time: .standard))"
         default:
             return nil
         }
@@ -519,6 +521,7 @@ struct BottomControlsView: View {
     @EnvironmentObject private var pairing: PairingStore
     @Binding var showSettings: Bool
     @Binding var showPlaces: Bool
+    @State private var showFlight = false
 
     @Namespace private var modeSelection
 
@@ -557,6 +560,19 @@ struct BottomControlsView: View {
                 joystickButton
                 primaryAction
             }
+            if session.simulated != nil {
+                HStack {
+                    Button("Position fixe") { session.holdPosition() }
+                    Spacer()
+                    Button(session.isChangingDestination ? "Calcul du trajet…" : "Aller au repère") {
+                        if let pin = session.pin { session.changeDestination(to: pin, pairing: pairing) }
+                    }
+                    .disabled(session.pin == nil || session.isChangingDestination || session.isRecovering)
+                }
+                .font(.caption.weight(.semibold))
+                Text("Choisissez un repère sur la carte pour changer de destination.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .padding(14)
         .locusGlass(.regular, in: trayShape)
@@ -565,6 +581,7 @@ struct BottomControlsView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: session.joystickActive)
         .animation(.snappy, value: session.travelMode)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: session.isRouting)
+        .sheet(isPresented: $showFlight) { FlightSetupView() }
     }
 
     /// Segmented by hand rather than a `Picker`, so the selection can slide
@@ -593,6 +610,9 @@ struct BottomControlsView: View {
                 .accessibilityLabel(mode.title)
             }
             Spacer(minLength: 0)
+            Button { showFlight = true } label: {
+                Label("Vol", systemImage: "airplane")
+            }
         }
         .padding(3)
         .background(Capsule().fill(Color.primary.opacity(0.06)))
@@ -636,7 +656,7 @@ struct BottomControlsView: View {
             Button {
                 session.stop(pairing: pairing)
             } label: {
-                Text("Stop")
+                Text("Arrêter")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(.white)
                     .frame(minWidth: 72)
@@ -654,7 +674,7 @@ struct BottomControlsView: View {
                 }
                 session.teleport(to: pin, pairing: pairing)
             } label: {
-                Text("Teleport")
+                Text("Position fixe")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(.black)
                     .frame(minWidth: 96)
