@@ -220,6 +220,7 @@ final class SpoofSession: ObservableObject {
     private var isStopping = false
     private var recoveryTask: Task<Void, Never>?
     private var backgroundBudgetExpired = false
+    private var resumeFlightOnForeground = false
     private var backgroundTaskRequested = false
     private var failureNotified = false
     private var lastEvidenceLog = Date.distantPast
@@ -564,6 +565,7 @@ final class SpoofSession: ObservableObject {
     func sceneDidEnterBackground() {
         checkpointRoute()
         checkpointFlight()
+        resumeFlightOnForeground = isFlying && !isFlightPaused
         SessionDiagnostics.shared.record("Passage en arrière-plan; exécution soumise à iOS")
         guard backend.persistsOnItsOwn, !isRouting, !joystickActive else { return }
         locationKeeper.stop()
@@ -579,6 +581,13 @@ final class SpoofSession: ObservableObject {
             keeperPausedForBackground = false
             locationKeeper.start()
         }
+        if resumeFlightOnForeground, !isFlying, !isStopping, savedFlight != nil {
+            resumeFlightOnForeground = false
+            SessionDiagnostics.shared.record("Reprise du scénario interrompu au retour au premier plan")
+            resumeFlightCheckpoint()
+            return
+        }
+        resumeFlightOnForeground = false
         if simulated != nil, !verification.isFresh(at: Date()) {
             status = .verifying
             refreshVerification()
@@ -787,7 +796,7 @@ final class SpoofSession: ObservableObject {
             }
             let pairing = PairingStore.shared
             guard await self.prepareTunnel(), generation == self.flightGeneration, !Task.isCancelled else { return }
-            var clock = elapsed
+            var clock = plan.elapsedAfterWaiting(elapsed, now: Date())
             var lastSave = elapsed
             var phase: FlightPhase?
             guard await self.apply(plan.fix(at: clock).coordinate, pairing: pairing, markRecent: false)
@@ -825,7 +834,7 @@ final class SpoofSession: ObservableObject {
                     continue
                 }
                 let tick = ProcessInfo.processInfo.systemUptime
-                let next = min(plan.duration, clock + 1)
+                let next = min(plan.duration, plan.elapsedAfterWaiting(clock + 1, now: Date()))
                 let fix = plan.fix(at: next)
                 guard await self.apply(fix.coordinate, pairing: pairing, markRecent: false) else {
                     if self.isRecovering { continue }
@@ -863,6 +872,7 @@ final class SpoofSession: ObservableObject {
     func toggleFlightPause() {
         guard isFlying else { return }
         isFlightPaused.toggle()
+        if isFlightPaused { resumeFlightOnForeground = false }
         checkpointFlight()
     }
 
@@ -879,6 +889,7 @@ final class SpoofSession: ObservableObject {
     }
 
     private func cancelFlight(keepResumePoint: Bool = false) {
+        resumeFlightOnForeground = false
         if keepResumePoint { checkpointFlight() }
         flightGeneration += 1
         flightTask?.cancel()
@@ -1750,6 +1761,13 @@ final class SpoofSession: ObservableObject {
         backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
             self?.checkpointRoute()
             self?.checkpointFlight()
+            // This expiration only ends the UIKit grace period. Core Location
+            // has its own background entitlement/session; do not stop it here.
+            if LocationProbe.shared.supportsBackgroundExecution {
+                SessionDiagnostics.shared.record("Délai UIKit terminé; poursuite via localisation en arrière-plan")
+                self?.endBackground()
+                return
+            }
             self?.backgroundBudgetExpired = true
             self?.recoveryTask?.cancel()
             self?.recoveryTask = nil

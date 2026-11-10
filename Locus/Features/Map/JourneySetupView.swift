@@ -184,6 +184,7 @@ struct JourneySetupView: View {
         let wait = FlightGroundStage.wait(at: stages[0].samples[0].point,
             seconds: schedule.leaveHome.timeIntervalSinceNow, phase: .waiting)
         config.groundStages = [wait] + stages
+        config.homeDepartureAt = schedule.leaveHome
         session.startFlight(config)
         if session.isFlying { onStart() } else { error = session.lastError ?? "Vérifiez l’appairage et LocalDevVPN." }
     }

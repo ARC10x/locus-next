@@ -2,6 +2,27 @@ import CoreLocation
 import XCTest
 
 final class JourneyPlanTests: XCTestCase {
+    func testScheduledWaitUsesDeadlineWithoutSkippingMovement() throws {
+        var config = OrlyDublinScenario.configuration
+        let now = Date(timeIntervalSince1970: 10000)
+        config.homeDepartureAt = now.addingTimeInterval(60)
+        config.groundStages = [.wait(at: config.points[0], seconds: 120, phase: .waiting)]
+        let plan = try FlightPlan(config)
+        XCTAssertEqual(plan.elapsedAfterWaiting(10, now: now), 60)
+        XCTAssertEqual(plan.elapsedAfterWaiting(10, now: now.addingTimeInterval(3600)), 120)
+        XCTAssertEqual(plan.elapsedAfterWaiting(130, now: now.addingTimeInterval(3600)), 130)
+        XCTAssertEqual(plan.elapsedAfterWaiting(70, now: now.addingTimeInterval(-3600)), 70)
+        let restored = try JSONDecoder().decode(FlightConfiguration.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored.homeDepartureAt, config.homeDepartureAt)
+    }
+
+    func testLegacyWaitKeepsItsSavedElapsedTime() throws {
+        var config = OrlyDublinScenario.configuration
+        config.groundStages = [.wait(at: config.points[0], seconds: 120, phase: .waiting)]
+        let plan = try FlightPlan(config)
+        XCTAssertEqual(plan.elapsedAfterWaiting(10, now: Date()), 10)
+    }
+
     func testSubmetreInterpolationMovesAlongWalkingAndTaxiCurves() {
         let a = CLLocationCoordinate2D(latitude: 48.7, longitude: 2.3)
         let b = Geo.offset(a, east: 1, north: 0)

@@ -125,6 +125,18 @@ struct FlightHUDView: View {
                 if let title = session.flightConfiguration.scenarioTitle {
                     Text(title).font(.caption).foregroundStyle(.secondary)
                 }
+                if fix.phase == .waiting, let departure = session.flightConfiguration.homeDepartureAt {
+                    Text("Départ du domicile : \(departure.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                    if !session.isFlightPaused {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(departure > context.date
+                                 ? "Attente : \(Int(ceil(departure.timeIntervalSince(context.date) / 60))) min"
+                                 : "Heure de départ atteinte · vérification en cours")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 ProgressView(value: fix.progress)
                 HStack {
                     Text("Sol : \(Int(unit.value(fix.speed))) \(unit.rawValue)")

@@ -68,6 +68,7 @@ struct FlightConfiguration: Codable, Equatable {
     var groundStages: [FlightGroundStage]?
     var scenarioTitle: String?
     var groundOnly: Bool?
+    var homeDepartureAt: Date?
     static let pointLabels = ["Terminal départ", "Début piste départ", "Fin piste départ",
                               "Seuil piste arrivée", "Fin piste arrivée", "Terminal arrivée"]
 }
@@ -106,6 +107,14 @@ struct FlightPlan {
     let configuration: FlightConfiguration
     let legs: [Leg]
     let duration: Double
+
+    /// Consume only the stationary initial wait. Never skip a road or flight leg.
+    func elapsedAfterWaiting(_ elapsed: Double, now: Date) -> Double {
+        guard let deadline = configuration.homeDepartureAt,
+              let first = legs.first, first.phase == .waiting,
+              elapsed < first.seconds else { return elapsed }
+        return max(elapsed, min(first.seconds, first.seconds - deadline.timeIntervalSince(now)))
+    }
 
     init(_ config: FlightConfiguration) throws {
         guard config.points.count == 6,

@@ -58,6 +58,12 @@ final class LocationProbe: NSObject, ObservableObject, CLLocationManagerDelegate
     /// use it, and closing the sheet mustn't freeze the chip underneath.
     private var users = 0
     private var sessionMonitoring = false
+    private var backgroundSession: CLBackgroundActivitySession?
+
+    var supportsBackgroundExecution: Bool {
+        sessionMonitoring && isRunning &&
+            (authorization == .authorizedAlways || authorization == .authorizedWhenInUse)
+    }
 
     func monitorSession(_ enabled: Bool) {
         guard sessionMonitoring != enabled else { return }
@@ -65,7 +71,15 @@ final class LocationProbe: NSObject, ObservableObject, CLLocationManagerDelegate
         manager.allowsBackgroundLocationUpdates = enabled
         manager.pausesLocationUpdatesAutomatically = !enabled
         manager.showsBackgroundLocationIndicator = enabled
-        if enabled { start() } else { stop() }
+        if enabled {
+            backgroundSession = CLBackgroundActivitySession()
+            start()
+            SessionDiagnostics.shared.record("Session de localisation en arrière-plan ouverte")
+        } else {
+            backgroundSession?.invalidate()
+            backgroundSession = nil
+            stop()
+        }
     }
 
     func start() {
